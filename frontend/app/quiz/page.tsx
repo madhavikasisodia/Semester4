@@ -1,5 +1,8 @@
 ﻿"use client"
 
+// page relies on client-side React state
+
+// reusable components from design system
 import { Navbar } from "@/components/navbar"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -12,13 +15,21 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+
+// iconography used for feedback and status
 import { Clock, BarChart3, Brain, CheckCircle2, XCircle, Trophy, ArrowLeft, Loader2 } from "lucide-react"
+
+// hooks for state and side effects
 import { useState, useEffect } from "react"
+
+// auth store and navigation helpers
 import { useAuthStore } from "@/lib/store"
 import { useRouter } from "next/navigation"
 
+// backend API base, set via NEXT_PUBLIC_API_URL or fallback to localhost
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
+// quiz metadata returned from server
 interface Quiz {
   id: number
   title: string
@@ -31,6 +42,7 @@ interface Quiz {
   created_at: string
 }
 
+// detailed structure of each quiz question (MCQ, etc.)
 interface Question {
   id: number
   quiz_id: number
@@ -42,6 +54,7 @@ interface Question {
   question_order: number
 }
 
+// response shape when a completed quiz attempt is returned
 interface QuizResult {
   attempt_id: number
   quiz_title: string
