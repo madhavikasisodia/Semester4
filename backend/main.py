@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from itertools import count
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -56,6 +57,9 @@ query userProfile($username: String!) {
 }
 """
 LEETCODE_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+GITHUB_USER_URL = "https://api.github.com/users/{username}"
+GITHUB_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
 
 def _safe_int(value: Any) -> int:
@@ -137,6 +141,11 @@ class InterviewStartRequest(BaseModel):
     company_context: Optional[str] = None
 
 
+class AgentRunRequest(BaseModel):
+    agent_id: str = Field(..., description="Identifier of the automation agent to execute")
+    inputs: Dict[str, Any] = Field(default_factory=dict, description="Optional input payload for the agent")
+
+
 def _parse_origins(raw_origins: Optional[str]) -> List[str]:
     if not raw_origins:
         return ["http://localhost:3000"]
@@ -198,8 +207,39 @@ def _current_timestamp() -> str:
     return _isoformat(_utcnow())
 
 
-def _seeded_random(value: str) -> random.Random:
-    return random.Random(value.lower())
+def _github_headers() -> Dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _normalize_github_username(raw: str) -> str:
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=400, detail="GitHub username is required.")
+
+    username = raw.strip()
+    if username.startswith("@"):
+        username = username[1:]
+
+    if not username:
+        raise HTTPException(status_code=400, detail="GitHub username is required.")
+
+    if "github.com" in username.lower():
+        candidate = username
+        if not candidate.startswith("http://") and not candidate.startswith("https://"):
+            candidate = "https://" + candidate
+        parsed = urlparse(candidate)
+        path = parsed.path.strip("/")
+        username = path.split("/")[0] if path else ""
+
+    username = username.split("?")[0].split("#")[0].strip().rstrip("/")
+
+    if not username:
+        raise HTTPException(status_code=400, detail="GitHub username is required.")
+
+    return username
 
 
 async def _fetch_leetcode_profile(username: str) -> Dict[str, Any]:
@@ -267,22 +307,38 @@ async def _fetch_leetcode_profile(username: str) -> Dict[str, Any]:
     }
 
 
-def _generate_github_profile(username: str) -> Dict[str, Any]:
-    rng = _seeded_random(f"github-{username}")
-    created_year = rng.randint(2015, 2023)
-    created_at = datetime(created_year, rng.randint(1, 12), rng.randint(1, 28)).isoformat() + "Z"
+async def _fetch_github_profile(username: str) -> Dict[str, Any]:
+    normalized_username = _normalize_github_username(username)
+    url = GITHUB_USER_URL.format(username=normalized_username)
+    try:
+        async with httpx.AsyncClient(timeout=GITHUB_TIMEOUT) as client:
+            response = await client.get(url, headers=_github_headers())
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 404:
+            raise HTTPException(status_code=404, detail="GitHub user not found.") from exc
+        if status == 403:
+            raise HTTPException(status_code=429, detail="GitHub API rate limit exceeded.") from exc
+        logger.warning("GitHub API error %s for %s", status, normalized_username)
+        raise HTTPException(status_code=502, detail="GitHub API responded with an error.") from exc
+    except httpx.RequestError as exc:
+        logger.error("Unable to reach GitHub for %s: %s", normalized_username, exc)
+        raise HTTPException(status_code=502, detail="Unable to reach GitHub at the moment.") from exc
+
+    payload = response.json()
     return {
-        "username": username,
-        "name": username.title(),
-        "bio": "Full-stack engineer passionate about developer tooling.",
-        "public_repos": rng.randint(10, 120),
-        "followers": rng.randint(5, 800),
-        "following": rng.randint(3, 400),
-        "avatar_url": f"https://api.dicebear.com/7.x/identicon/svg?seed={username}",
-        "html_url": f"https://github.com/{username}",
-        "created_at": created_at,
-        "location": rng.choice(["Remote", "San Francisco, CA", "Bengaluru, India", "Berlin, Germany"]),
-        "blog": "https://devlog.example.com",
+        "username": payload.get("login") or normalized_username,
+        "name": payload.get("name"),
+        "bio": payload.get("bio"),
+        "public_repos": payload.get("public_repos"),
+        "followers": payload.get("followers"),
+        "following": payload.get("following"),
+        "avatar_url": payload.get("avatar_url"),
+        "html_url": payload.get("html_url") or f"https://github.com/{normalized_username}",
+        "created_at": payload.get("created_at"),
+        "location": payload.get("location"),
+        "blog": payload.get("blog"),
     }
 
 
@@ -763,6 +819,222 @@ RESUME_ID_COUNTER = count(1)
 CERTIFICATE_ID_COUNTER = count(1)
 
 
+def _aggregate_skill_focus(history: List[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    counts: Dict[str, int] = {}
+    for entry in history:
+        for skill in entry.get("skills_practiced", []) or []:
+            counts[skill] = counts.get(skill, 0) + 1
+    return sorted(counts.items(), key=lambda item: item[1], reverse=True)
+
+
+def _recent_history_window(days: int) -> List[Dict[str, Any]]:
+    if not PROGRESS_HISTORY:
+        return []
+    window = max(1, days)
+    return PROGRESS_HISTORY[-min(window, len(PROGRESS_HISTORY)) :]
+
+
+def _compute_metric_delta(history: List[Dict[str, Any]], field: str) -> float:
+    if len(history) < 2:
+        return 0.0
+    return float(history[-1].get(field, 0) - history[0].get(field, 0))
+
+
+def _get_top_recommendations(limit: int = 3) -> List[Dict[str, Any]]:
+    sorted_recs = sorted(RECOMMENDATIONS, key=lambda rec: rec.get("created_at", ""), reverse=True)
+    return sorted_recs[:limit]
+
+
+def _execute_progress_coach(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    requested_days = inputs.get("days")
+    try:
+        days = int(requested_days)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(3, min(30, days))
+    window = _recent_history_window(days)
+    if not window:
+        return {
+            "summary": "No practice activity recorded yet.",
+            "insights": [],
+            "recommended_actions": ["Log at least one study session so the coach can detect patterns."],
+        }
+
+    stats = _calculate_progress_stats()
+    avg_problems = round(sum(item.get("problems_solved", 0) for item in window) / len(window), 2)
+    avg_minutes = round(sum(item.get("time_spent_minutes", 0) for item in window) / len(window), 1)
+    velocity = _compute_metric_delta(window, "problems_solved")
+    best_day = max(window, key=lambda item: item.get("problems_solved", 0))
+    slow_day = min(window, key=lambda item: item.get("problems_solved", 0))
+    skills_ranked = _aggregate_skill_focus(window)
+    global_skills = _aggregate_skill_focus(PROGRESS_HISTORY)
+    focus_skill = skills_ranked[0][0] if skills_ranked else None
+    neglected_skills = [skill for skill, _ in global_skills if skill not in {skill for skill, _ in skills_ranked[:2]}]
+
+    insights = [
+        {
+            "label": "Daily Throughput",
+            "detail": f"Averaging {avg_problems} problems and {avg_minutes} minutes per day over the last {len(window)} days.",
+        },
+        {
+            "label": "Momentum",
+            "detail": "Trending up" if velocity > 0 else "Holding steady" if velocity == 0 else "Slight dip—plan a catch-up session.",
+            "delta": velocity,
+        },
+        {
+            "label": "Peak Performance",
+            "detail": f"Best output was {best_day.get('problems_solved', 0)} problems on {best_day.get('date')}.",
+        },
+    ]
+
+    recommended_actions = []
+    if focus_skill:
+        recommended_actions.append(
+            f"Double down on {focus_skill} with a timed mock this week to cement gains."
+        )
+    if neglected_skills:
+        recommended_actions.append(
+            f"Rotate in {neglected_skills[0]} to balance your skill exposure."
+        )
+    if slow_day.get("problems_solved", 0) <= max(1, best_day.get("problems_solved", 0) // 2):
+        recommended_actions.append(
+            "Schedule a lighter review block immediately after intense practice days to avoid burnout."
+        )
+    recommended_actions.append(
+        f"Target {stats['current_streak'] + 1} days of streak to surpass your current {stats['longest_streak']}-day record."
+    )
+
+    preview_recs = [
+        {
+            "id": rec["id"],
+            "title": rec["title"],
+            "priority": rec["priority"],
+            "status": rec["status"],
+        }
+        for rec in _get_top_recommendations()
+    ]
+
+    return {
+        "summary": f"Consistent practice detected with {stats['total_problems_solved']} total problems solved.",
+        "insights": insights,
+        "recommended_actions": recommended_actions,
+        "preview_recommendations": preview_recs,
+        "inputs_used": {"days": len(window)},
+    }
+
+
+def _execute_career_strategy(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    company_input = inputs.get("company") or inputs.get("target_company") or "Google"
+    company = _get_company_or_404(company_input)
+    requirements = company.get("requirements", {})
+    technical_targets = requirements.get("technical_skills", [])
+    practiced_skills = [skill for skill, _ in _aggregate_skill_focus(PROGRESS_HISTORY)]
+    matched = [skill for skill in technical_targets if skill in practiced_skills]
+    gaps = [skill for skill in technical_targets if skill not in matched]
+    credential_snapshot = {
+        "resumes_uploaded": len(RESUMES),
+        "certifications": len(CERTIFICATIONS),
+        "latest_certification": CERTIFICATIONS[-1]["name"] if CERTIFICATIONS else None,
+        "achievements": len(ACHIEVEMENTS),
+    }
+
+    recommended_focus = []
+    if gaps:
+        recommended_focus.append(f"Add focused practice for {gaps[0]} to match {company['name']} expectations.")
+    if credential_snapshot["resumes_uploaded"] == 0:
+        recommended_focus.append("Upload a resume to unlock AI-driven resume critiques.")
+    if credential_snapshot["certifications"] == 0:
+        recommended_focus.append("Earn at least one certification that aligns with your target cloud/provider stack.")
+
+    highlighted_resources = [
+        {
+            "title": rec["title"],
+            "category": rec["category"],
+            "priority": rec["priority"],
+        }
+        for rec in _get_top_recommendations(2)
+    ]
+
+    return {
+        "company": company["name"],
+        "summary": f"Generated a readiness plan for {company['name']} using current practice signals.",
+        "skill_alignment": {
+            "matched": matched,
+            "gaps": gaps,
+            "practice_sample": practiced_skills[:5],
+        },
+        "credential_snapshot": credential_snapshot,
+        "suggested_actions": recommended_focus or ["Keep shipping portfolio updates weekly."] ,
+        "supporting_resources": highlighted_resources,
+    }
+
+
+AGENT_CATALOG: List[Dict[str, Any]] = [
+    {
+        "id": "progress-coach",
+        "name": "Progress Coach",
+        "description": "Analyzes recent learning telemetry and prescribes the next focus areas.",
+        "inputs_schema": {
+            "days": {
+                "type": "integer",
+                "minimum": 3,
+                "maximum": 30,
+                "default": 7,
+                "description": "Number of recent days to inspect",
+            }
+        },
+        "capabilities": ["progress", "learning-plan", "insights"],
+    },
+    {
+        "id": "career-strategist",
+        "name": "Career Strategist",
+        "description": "Maps your current readiness to a target company and highlights gaps.",
+        "inputs_schema": {
+            "company": {
+                "type": "string",
+                "description": "Company name (Google, Microsoft, etc.)",
+                "default": "Google",
+            }
+        },
+        "capabilities": ["career-planning", "company-readiness"],
+    },
+]
+
+
+AGENT_EXECUTORS = {
+    "progress-coach": _execute_progress_coach,
+    "career-strategist": _execute_career_strategy,
+}
+
+
+AGENT_RUNS: Dict[str, Dict[str, Any]] = {}
+MAX_AGENT_RUNS = 50
+
+
+def _get_agent_definition(agent_id: str) -> Dict[str, Any]:
+    for agent in AGENT_CATALOG:
+        if agent["id"] == agent_id:
+            return agent
+    raise HTTPException(status_code=404, detail="Agent not found")
+
+
+def _store_agent_run(agent_id: str, inputs: Dict[str, Any], status: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = str(uuid4())
+    entry = {
+        "run_id": run_id,
+        "agent_id": agent_id,
+        "inputs": inputs,
+        "status": status,
+        "result": result,
+        "created_at": _current_timestamp(),
+    }
+    AGENT_RUNS[run_id] = entry
+    if len(AGENT_RUNS) > MAX_AGENT_RUNS:
+        oldest_id = min(AGENT_RUNS, key=lambda key: AGENT_RUNS[key]["created_at"])
+        AGENT_RUNS.pop(oldest_id, None)
+    return entry
+
+
 INTERVIEW_PERSONAS = [
     {
         "persona_id": "mentor",
@@ -1032,13 +1304,13 @@ async def get_leetcode_profile(username: str) -> Dict[str, Any]:
 
 @app.get("/github/{username}")
 async def get_github_profile(username: str) -> Dict[str, Any]:
-    return _generate_github_profile(username)
+    return await _fetch_github_profile(username)
 
 
 @app.get("/profile/{leetcode_username}/{github_username}")
 async def get_combined_profile(leetcode_username: str, github_username: str) -> Dict[str, Any]:
     leetcode_profile = await _fetch_leetcode_profile(leetcode_username)
-    github_profile = _generate_github_profile(github_username)
+    github_profile = await _fetch_github_profile(github_username)
     return {
         "leetcode": leetcode_profile,
         "github": github_profile,
@@ -1242,6 +1514,51 @@ async def get_dashboard_overview() -> Dict[str, Any]:
     }
 
 
+# ----------------------- Agent Automation APIs -----------------------
+
+
+@app.get("/agents")
+async def list_agents() -> Dict[str, Any]:
+    return {"agents": AGENT_CATALOG}
+
+
+@app.get("/agents/runs")
+async def list_agent_runs(limit: int = Query(10, ge=1, le=50)) -> Dict[str, Any]:
+    runs = sorted(AGENT_RUNS.values(), key=lambda entry: entry["created_at"], reverse=True)
+    return {"runs": runs[:limit]}
+
+
+@app.get("/agents/runs/{run_id}")
+async def get_agent_run(run_id: str) -> Dict[str, Any]:
+    entry = AGENT_RUNS.get(run_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return entry
+
+
+@app.post("/agents/run")
+async def run_agent(request: AgentRunRequest) -> Dict[str, Any]:
+    definition = _get_agent_definition(request.agent_id)
+    executor = AGENT_EXECUTORS.get(request.agent_id)
+    if executor is None:
+        raise HTTPException(status_code=501, detail="Agent executor not implemented")
+
+    try:
+        result = executor(request.inputs or {})
+        status = "completed"
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Agent %s failed", request.agent_id)
+        status = "failed"
+        result = {"error": str(exc)}
+
+    record = _store_agent_run(request.agent_id, request.inputs or {}, status, result)
+    response = {"run_id": record["run_id"], "status": record["status"], "result": record["result"]}
+    response["agent"] = {"id": definition["id"], "name": definition.get("name")}
+    return response
+
+
 # ----------------------- Resume & Certification APIs -----------------------
 
 
@@ -1356,6 +1673,7 @@ async def start_interview(request: InterviewStartRequest) -> Dict[str, Any]:
         "end_time": None,
         "questions_answered": 0,
         "company_context": request.company_context,
+        "interviewer": persona,
     }
     INTERVIEW_SESSIONS[session_id] = session_data
     current_question = questions[0]
@@ -1365,10 +1683,19 @@ async def start_interview(request: InterviewStartRequest) -> Dict[str, Any]:
         "question_count": len(questions),
         "current_question_number": 1,
         "current_question": current_question["title"],
-        "current_question_text": current_question["description"],
+        "current_question_text": current_question.get("description"),
+        "current_question_id": current_question.get("id"),
+        "current_question_difficulty": current_question.get("difficulty"),
         "total_questions": len(questions),
         "difficulty": request.difficulty,
         "start_time": start_time,
+        "interviewer": {
+            "id": persona["persona_id"],
+            "name": persona["name"],
+            "tone": persona.get("tone"),
+            "style": persona.get("style"),
+            "intro_message": persona.get("intro_message"),
+        },
     }
 
 
@@ -1398,6 +1725,7 @@ async def submit_answer(
             "question_id": nxt["id"],
             "question": nxt["title"],
             "difficulty": nxt["difficulty"],
+            "question_text": nxt.get("description"),
         }
     return {
         "evaluation": evaluation,
