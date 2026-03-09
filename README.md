@@ -24,6 +24,35 @@ frontend/
   package.json       # Next.js scripts and dependencies
 ```
 
+## Architecture Diagram
+
+> Tip: install a Mermaid preview extension in VS Code to render the diagram visually.
+
+```mermaid
+graph TD
+%% Services
+svcazureappservice_frontend["`Name: frontend\nPath: frontend\nLanguage: ts\nPort: 3000`"]
+svcazureappservice_backendapi["`Name: backend-api\nPath: backend\nLanguage: python\nPort: 8000`"]
+subgraph "Compute Resources"
+%% Resources
+azureappservice_frontend("`frontend (Azure App Service)`")
+azureappservice_backendapi("`backend-api (Azure App Service)`")
+end
+subgraph "Dependency Resources"
+%% Dependency Resources
+azuredatabaseforpostgresql_azuredatabaseforpostgresql["`Azure Database for PostgreSQL (Azure Database for PostgreSQL)`"]
+azurekeyvault_azurekeyvault["`Azure Key Vault (Azure Key Vault)`"]
+azureapplicationinsights_azureapplicationinsights["`Azure Application Insights (Azure Application Insights)`"]
+end
+%% Relationships
+svcazureappservice_frontend --> |"hosted on"| azureappservice_frontend
+azureappservice_frontend -.-> |"http"| azureappservice_backendapi
+svcazureappservice_backendapi --> |"hosted on"| azureappservice_backendapi
+azureappservice_backendapi -.-> |"secret"| azuredatabaseforpostgresql_azuredatabaseforpostgresql
+azureappservice_backendapi -.-> |"secret"| azurekeyvault_azurekeyvault
+azureappservice_backendapi -.-> |"secret"| azureapplicationinsights_azureapplicationinsights
+```
+
 ## Tech Stack
 
 - **Frontend**: Next.js 16 (App Router), React 19, Tailwind/postcss utilities, Radix UI, Zustand state, Recharts.
