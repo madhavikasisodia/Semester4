@@ -73,13 +73,23 @@ python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Environment variables
-echo "SUPABASE_URL=..." >> .env
-echo "SUPABASE_SERVICE_ROLE_KEY=..." >> .env
-# Optional
-echo "ALLOWED_ORIGINS=http://localhost:3000" >> .env
-echo "GITHUB_TOKEN=ghp_xxx" >> .env
+# Environment variables (copy .env.example to .env first)
+cp .env.example .env
+```
 
+Edit `.env` and provide:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `SUPABASE_URL` | ✅ | Supabase project URL (https://...). |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Service role key used for auth + profile sync. |
+| `SUPABASE_ANON_KEY` | optional | Acts as fallback if the service role key is unavailable. |
+| `ALLOWED_ORIGINS` | ✅ | Comma-separated list of frontend origins (prod domain, staging domain, localhost). |
+| `GITHUB_TOKEN` | optional | Personal access token for higher GitHub API rate limits. |
+
+Run the API:
+
+```bash
 uvicorn main:app --reload --port 8000
 ```
 
@@ -87,9 +97,12 @@ uvicorn main:app --reload --port 8000
 ```bash
 cd frontend
 pnpm install
+# copy env template and point it to your backend
+cp .env.example .env.local
 pnpm dev   # runs Next.js on http://localhost:3000
 ```
-The frontend is pre-configured to call the backend at `http://localhost:8000`. Override via `NEXT_PUBLIC_API_BASE` in a `.env.local` file if needed.
+
+Set `NEXT_PUBLIC_API_BASE` inside `.env.local` (or hosting provider variables) to the publicly accessible FastAPI URL (e.g., `https://api.yourdomain.com`).
 
 ## Key API Surface
 
@@ -133,6 +146,14 @@ uvicorn main:app --reload  # hot-reload server
 - Next.js app can be deployed on Vercel or any Node-friendly host; remember to set `NEXT_PUBLIC_API_BASE` to your backend URL.
 - Configure Supabase service credentials securely (environment variables in your hosting provider).
 - Persist agent runs if you need durability: plug `_store_agent_run` into a database in place of in-memory storage.
+
+### Deployment Checklist
+
+1. Copy the provided `.env.example` files (both backend and frontend) and fill in production values, including every allowed frontend origin.
+2. Run `pnpm build` from `/frontend`; the build now fails on TypeScript errors, which prevents shipping broken client bundles.
+3. Run `uvicorn main:app --host 0.0.0.0 --port 8000` (or your preferred ASGI server) with the same environment variables you validated locally.
+4. Provide the backend base URL to the frontend via `NEXT_PUBLIC_API_BASE` so API calls never target localhost in production.
+5. Configure HTTPS and a CDN (e.g., Vercel/Azure Front Door) to front the Next.js site, and ensure the backend only allows the production origins you listed in `ALLOWED_ORIGINS`.
 
 ## License
 

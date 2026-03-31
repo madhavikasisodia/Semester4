@@ -5,12 +5,26 @@
 // shared layout components
 import { Navbar } from "@/components/navbar"
 import { Card } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 
 // React hooks for component state management
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
+import type { FormEvent } from "react"
 
 // API helpers and type definitions for progress data
-import { learningAPI, type ProgressStats, type ProgressHistory, type Achievement } from "@/lib/api"
+import {
+  learningAPI,
+  profileAPI,
+  type ProgressStats,
+  type ProgressHistory,
+  type Achievement,
+  type LeetCodeProfile,
+  type GitHubProfile,
+  type CodeChefProfile,
+} from "@/lib/api"
+import { normalizeGithubUsername } from "@/lib/utils"
 
 // icons used in the progress dashboard
 import { 
@@ -22,7 +36,10 @@ import {
   Brain,
   Flame,
   Award,
-  AlertCircle
+  AlertCircle,
+  Github,
+  Code2,
+  ChefHat
 } from "lucide-react"
 
 // charting components from recharts library
@@ -69,6 +86,15 @@ export default function ProgressPage() {
   const [loading, setLoading] = useState(true) // loading spinner
   const [error, setError] = useState<string | null>(null) // error banner
   const [timeRange, setTimeRange] = useState(30) // days of history to fetch
+  const [leetcodeUsername, setLeetcodeUsername] = useState("")
+  const [githubUsername, setGithubUsername] = useState("")
+  const [leetcodeProfile, setLeetcodeProfile] = useState<LeetCodeProfile | null>(null)
+  const [githubProfile, setGithubProfile] = useState<GitHubProfile | null>(null)
+  const [codechefUsername, setCodechefUsername] = useState("")
+  const [codechefProfile, setCodechefProfile] = useState<CodeChefProfile | null>(null)
+  const [profileLoading, setProfileLoading] = useState(false)
+  const [profileError, setProfileError] = useState<string | null>(null)
+  const [profilesLastSynced, setProfilesLastSynced] = useState<string | null>(null)
 
   // refetch whenever timeRange changes (user picks 7/30/90 days)
   useEffect(() => {
@@ -95,6 +121,67 @@ export default function ProgressPage() {
     }
   }
 
+  const fetchExternalProfiles = useCallback(
+    async (rawLeetcode: string, rawGithub: string, rawCodechef: string) => {
+      const normalizedLeetcode = rawLeetcode.trim()
+      const normalizedGithub = normalizeGithubUsername(rawGithub)
+      const normalizedCodechef = rawCodechef.trim()
+
+      if (!normalizedLeetcode || !normalizedGithub || !normalizedCodechef) {
+        setProfileError("Please enter LeetCode, GitHub, and CodeChef usernames")
+        return
+      }
+
+      setProfileLoading(true)
+      setProfileError(null)
+      try {
+        const [combinedProfiles, codechefData] = await Promise.all([
+          profileAPI.getCombinedProfile(normalizedLeetcode, normalizedGithub),
+          profileAPI.getCodeChefProfile(normalizedCodechef),
+        ])
+        setLeetcodeProfile(combinedProfiles.leetcode)
+        setGithubProfile(combinedProfiles.github)
+        setCodechefProfile(codechefData)
+        if (typeof window !== "undefined") {
+          localStorage.setItem("leetcode_username", normalizedLeetcode)
+          localStorage.setItem("github_username", normalizedGithub)
+          localStorage.setItem("codechef_username", normalizedCodechef)
+        }
+        setProfilesLastSynced(new Date().toISOString())
+        setLeetcodeUsername(normalizedLeetcode)
+        setGithubUsername(normalizedGithub)
+        setCodechefUsername(normalizedCodechef)
+      } catch (err: any) {
+        setProfileError(formatErrorMessage(err))
+        setCodechefProfile(null)
+      } finally {
+        setProfileLoading(false)
+      }
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const savedLeetcode = localStorage.getItem("leetcode_username") || ""
+    const savedGithubRaw = localStorage.getItem("github_username") || ""
+    const savedGithub = normalizeGithubUsername(savedGithubRaw)
+    const savedCodechef = (localStorage.getItem("codechef_username") || "").trim()
+
+    if (savedLeetcode) {
+      setLeetcodeUsername(savedLeetcode)
+    }
+    if (savedGithub) {
+      setGithubUsername(savedGithub)
+    }
+    if (savedCodechef) {
+      setCodechefUsername(savedCodechef)
+    }
+    if (savedLeetcode && savedGithub && savedCodechef) {
+      fetchExternalProfiles(savedLeetcode, savedGithub, savedCodechef)
+    }
+  }, [fetchExternalProfiles])
+
   // transform raw history into shape expected by recharts components
   const prepareChartData = () => {
     return history.map(item => ({
@@ -117,11 +204,31 @@ export default function ProgressPage() {
     ]
   }
 
+  const handleProfileSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    fetchExternalProfiles(leetcodeUsername, githubUsername, codechefUsername)
+  }
+
+  const formatNumber = (value?: number | null) =>
+    typeof value === 'number' ? value.toLocaleString() : '—'
+
+  const formatPercent = (value?: number | null) =>
+    typeof value === 'number' ? `${value.toFixed(1)}%` : '—'
+
+  const formatRank = (value?: number | null) =>
+    typeof value === 'number' ? `#${value.toLocaleString()}` : '—'
+
+  const formatRatingWithDate = (value?: number | null, date?: string | null) => {
+    const ratingText = formatNumber(value)
+    if (ratingText === '—' || !date) return ratingText
+    return `${ratingText} (${date})`
+  }
+
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
       
-      <main className="container mx-auto px-4 py-8">
+      <main className="container mx-auto px-4 pt-24 pb-8">
         <div className="max-w-7xl mx-auto space-y-8">
           {/* Header */}
           <div className="space-y-4">
@@ -185,6 +292,204 @@ export default function ProgressPage() {
                   </div>
                   <p className="text-sm text-muted-foreground">Achievements</p>
                 </Card>
+              </div>
+
+              {/* External Coding Profiles */}
+              <div className="space-y-4">
+                <Card className="p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm text-muted-foreground">Bring in live platform metrics</p>
+                      <h3 className="text-xl font-semibold">Sync LeetCode & GitHub</h3>
+                    </div>
+                    {profilesLastSynced && (
+                      <span className="text-sm text-muted-foreground">
+                        Last synced {new Date(profilesLastSynced).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    )}
+                  </div>
+
+                  <form
+                    onSubmit={handleProfileSubmit}
+                    className="grid gap-4 md:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto]"
+                  >
+                    <div>
+                      <Label htmlFor="progress-leetcode">LeetCode username</Label>
+                      <Input
+                        id="progress-leetcode"
+                        placeholder="leetcode-handle"
+                        value={leetcodeUsername}
+                        onChange={(event) => setLeetcodeUsername(event.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="progress-github">GitHub username</Label>
+                      <Input
+                        id="progress-github"
+                        placeholder="github-handle"
+                        value={githubUsername}
+                        onChange={(event) => setGithubUsername(event.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="progress-codechef">CodeChef username</Label>
+                      <Input
+                        id="progress-codechef"
+                        placeholder="codechef-handle"
+                        value={codechefUsername}
+                        onChange={(event) => setCodechefUsername(event.target.value)}
+                      />
+                    </div>
+                    <Button type="submit" disabled={profileLoading} className="self-end h-12">
+                      {profileLoading ? "Syncing..." : "Sync profiles"}
+                    </Button>
+                  </form>
+
+                  {profileError && (
+                    <div className="flex items-center gap-2 text-sm text-destructive">
+                      <AlertCircle className="h-4 w-4" />
+                      <span>{profileError}</span>
+                    </div>
+                  )}
+                </Card>
+
+                <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
+                  <Card className="p-6 space-y-6">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-full bg-primary/10 text-primary">
+                        <Code2 className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-semibold">LeetCode Activity</h3>
+                        <p className="text-sm text-muted-foreground">
+                          {leetcodeProfile ? `@${leetcodeProfile.username}` : "Waiting for connection"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {leetcodeProfile ? (
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Total solved</p>
+                          <p className="text-2xl font-bold">{formatNumber(leetcodeProfile.total_solved)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Acceptance rate</p>
+                          <p className="text-2xl font-bold">{formatPercent(leetcodeProfile.acceptance_rate)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Easy / Medium / Hard</p>
+                          <p className="text-lg font-semibold">
+                            {formatNumber(leetcodeProfile.easy_solved)} / {formatNumber(leetcodeProfile.medium_solved)} / {formatNumber(leetcodeProfile.hard_solved)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Ranking</p>
+                          <p className="text-lg font-semibold">{formatNumber(leetcodeProfile.ranking)}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Connect your LeetCode handle to compare live solved counts with your study streak.
+                      </p>
+                    )}
+                  </Card>
+
+                  <Card className="p-6 space-y-6">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-full bg-muted text-foreground">
+                        <Github className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-semibold">GitHub Activity</h3>
+                        <p className="text-sm text-muted-foreground">
+                          {githubProfile ? `@${githubProfile.username}` : "Waiting for connection"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {githubProfile ? (
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Public repos</p>
+                          <p className="text-2xl font-bold">{formatNumber(githubProfile.public_repos)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Followers</p>
+                          <p className="text-2xl font-bold">{formatNumber(githubProfile.followers)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Following</p>
+                          <p className="text-lg font-semibold">{formatNumber(githubProfile.following)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Joined</p>
+                          <p className="text-lg font-semibold">
+                            {githubProfile.created_at ? new Date(githubProfile.created_at).toLocaleDateString() : "—"}
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Connect your GitHub handle to see repository momentum alongside your learning metrics.
+                      </p>
+                    )}
+                  </Card>
+
+                  <Card className="p-6 space-y-6">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 rounded-full bg-secondary/10 text-secondary-foreground">
+                        <ChefHat className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-semibold">CodeChef Activity</h3>
+                        <p className="text-sm text-muted-foreground">
+                          {codechefProfile ? `@${codechefProfile.username}` : "Waiting for connection"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {codechefProfile ? (
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <p className="text-xs text-muted-foreground">Current rating</p>
+                          <p className="text-2xl font-bold">{formatNumber(codechefProfile.rating)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Stars</p>
+                          <p className="text-lg font-semibold">{codechefProfile.stars || "—"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Highest rating</p>
+                          <p className="text-lg font-semibold">
+                            {formatRatingWithDate(
+                              codechefProfile.highest_rating,
+                              codechefProfile.highest_rating_time ?? null
+                            )}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Global / Country rank</p>
+                          <p className="text-lg font-semibold">
+                            {formatRank(codechefProfile.global_rank)} / {formatRank(codechefProfile.country_rank)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Fully solved</p>
+                          <p className="text-lg font-semibold">{formatNumber(codechefProfile.fully_solved)}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground">Partially solved</p>
+                          <p className="text-lg font-semibold">{formatNumber(codechefProfile.partially_solved)}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Connect your CodeChef handle to compare contest ratings with your learning stats.
+                      </p>
+                    )}
+                  </Card>
+                </div>
               </div>
 
               {/* Performance Metrics */}

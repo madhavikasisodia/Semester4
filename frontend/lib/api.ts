@@ -4,10 +4,85 @@ export const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000",
 })
 
-// Add auth token to requests
+const TOKEN_STORAGE_KEYS = ["auth_token", "token", "access_token"] as const
+const USER_STORAGE_KEY = "edunerve_user"
+
+const buildApiUrl = (path: string) => {
+  const base = api.defaults.baseURL || ""
+  const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`
+  return `${normalizedBase}${normalizedPath}` || path
+}
+
+const persistAccessToken = (token: string) => {
+  TOKEN_STORAGE_KEYS.forEach((key) => localStorage.setItem(key, token))
+}
+
+const clearStoredSession = () => {
+  TOKEN_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key))
+  localStorage.removeItem("refresh_token")
+  localStorage.removeItem(USER_STORAGE_KEY)
+}
+
+let refreshPromise: Promise<string | null> | null = null
+
+const refreshAuthToken = async (): Promise<string | null> => {
+  if (typeof window === "undefined") return null
+  const refreshToken = localStorage.getItem("refresh_token")
+  if (!refreshToken) return null
+
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const url = buildApiUrl("/auth/refresh")
+        const { data } = await axios.post<AuthResponse>(url, { refresh_token: refreshToken })
+
+        if (data.access_token) {
+          persistAccessToken(data.access_token)
+        }
+
+        if (data.refresh_token) {
+          localStorage.setItem("refresh_token", data.refresh_token)
+        }
+
+        if (data.email) {
+          const fallbackName = data.email.split("@")[0] || "user"
+          try {
+            const rawUser = localStorage.getItem(USER_STORAGE_KEY)
+            const parsedUser = rawUser ? JSON.parse(rawUser) : {}
+            const updatedUser = {
+              ...parsedUser,
+              id: data.user_id,
+              email: data.email,
+              name: parsedUser?.name || fallbackName,
+              role: parsedUser?.role || "student",
+            }
+            localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(updatedUser))
+          } catch {
+            localStorage.setItem(
+              USER_STORAGE_KEY,
+              JSON.stringify({ id: data.user_id, email: data.email, name: fallbackName, role: "student" })
+            )
+          }
+        }
+
+        return data.access_token ?? null
+      } catch (error) {
+        clearStoredSession()
+        return null
+      } finally {
+        refreshPromise = null
+      }
+    })()
+  }
+
+  return refreshPromise
+}
+
+
 api.interceptors.request.use((config) => {
   if (typeof window !== "undefined") {
-    // Support multiple token keys to avoid mismatch across pages
+    
     const token =
       localStorage.getItem("auth_token") ||
       localStorage.getItem("token") ||
@@ -20,6 +95,33 @@ api.interceptors.request.use((config) => {
   }
   return config
 })
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const status = error.response?.status
+    const originalRequest = error.config
+    const isAuthRoute = typeof originalRequest?.url === "string" && originalRequest.url.includes("/auth/")
+
+    if (
+      status === 401 &&
+      typeof window !== "undefined" &&
+      originalRequest &&
+      !isAuthRoute &&
+      !(originalRequest as any)._retry
+    ) {
+      ;(originalRequest as any)._retry = true
+      const newToken = await refreshAuthToken()
+      if (newToken) {
+        originalRequest.headers = originalRequest.headers ?? {}
+        originalRequest.headers.Authorization = `Bearer ${newToken}`
+        return api(originalRequest)
+      }
+    }
+
+    return Promise.reject(error)
+  }
+)
 
 // ==================== TYPE DEFINITIONS ====================
 
@@ -50,9 +152,38 @@ export interface GitHubProfile {
   blog?: string
 }
 
+export interface CodeChefProfile {
+  username: string
+  rating?: number
+  stars?: string
+  highest_rating?: number
+  highest_rating_time?: string | null
+  global_rank?: number
+  country_rank?: number
+  fully_solved?: number
+  partially_solved?: number
+}
+
 export interface CombinedProfile {
   leetcode: LeetCodeProfile
   github: GitHubProfile
+}
+
+export interface AuthResponse {
+  user_id: string
+  email: string
+  message: string
+  access_token?: string
+  refresh_token?: string
+}
+
+export interface LoginPayload {
+  email: string
+  password: string
+}
+
+export interface SignupPayload extends LoginPayload {
+  metadata?: Record<string, any>
 }
 
 // Learning Management Types
@@ -74,6 +205,20 @@ export interface Recommendation {
   status: string
   created_at: string
   completed_at?: string
+}
+
+export interface TopicResource {
+  title: string
+  url: string
+  source: string
+  content_type: string
+  summary?: string
+}
+
+export interface TopicResourceResponse {
+  topic: string
+  items: TopicResource[]
+  fetched_at: string
 }
 
 export interface ProgressStats {
@@ -333,6 +478,20 @@ export interface InterviewReport {
   performance_breakdown?: any
 }
 
+// ==================== AUTH API ====================
+
+export const authAPI = {
+  async login(payload: LoginPayload): Promise<AuthResponse> {
+    const { data } = await api.post("/auth/login", payload)
+    return data
+  },
+
+  async signup(payload: SignupPayload): Promise<AuthResponse> {
+    const { data } = await api.post("/auth/signup", payload)
+    return data
+  },
+}
+
 // ==================== PROFILE API ====================
 
 export const profileAPI = {
@@ -354,6 +513,12 @@ export const profileAPI = {
     githubUsername: string
   ): Promise<CombinedProfile> {
     const { data } = await api.get(`/profile/${leetcodeUsername}/${githubUsername}`)
+    return data
+  },
+
+  // Get CodeChef profile
+  async getCodeChefProfile(username: string): Promise<CodeChefProfile> {
+    const { data } = await api.get(`/codechef/${username}`)
     return data
   },
 }
@@ -462,7 +627,15 @@ export const learningAPI = {
     if (status) params.append("status", status)
     if (priority) params.append("priority", priority)
     
-    const { data } = await api.get(`/recommendations?${params.toString()}`)
+    const query = params.toString()
+    const url = query ? `/recommendations?${query}` : "/recommendations"
+    const { data } = await api.get(url)
+    return data
+  },
+
+  async getTopicResources(topic: string): Promise<TopicResourceResponse> {
+    const safeTopic = encodeURIComponent(topic)
+    const { data } = await api.get(`/topics/${safeTopic}/resources`)
     return data
   },
 

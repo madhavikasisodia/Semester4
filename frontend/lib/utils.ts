@@ -60,3 +60,23 @@ export function formatApiError(detail: unknown, fallback = 'Something went wrong
     return fallback
   }
 }
+
+export function normalizeGithubUsername(value: string) {
+  if (!value) return ''
+
+  let username = value.trim()
+
+  if (username.startsWith('@')) {
+    username = username.slice(1)
+  }
+
+  if (username.toLowerCase().includes('github.com')) {
+    username = username.replace(/^https?:\/\//i, '')
+    const parts = username.split('github.com')[1] || ''
+    username = parts.replace(/^\//, '').split('/')[0]
+  }
+
+  username = username.split(/[?#]/)[0].replace(/\/$/, '').trim()
+
+  return username
+}

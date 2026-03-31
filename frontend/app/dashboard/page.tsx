@@ -35,23 +35,9 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { normalizeGithubUsername } from "@/lib/utils"
 
 type DashboardOverview = Awaited<ReturnType<typeof learningAPI.getDashboardOverview>>
-
-const normalizeGithubUsername = (value: string) => {
-  if (!value) return ""
-  let username = value.trim()
-  if (username.startsWith("@")) {
-    username = username.slice(1)
-  }
-  if (username.toLowerCase().includes("github.com")) {
-    username = username.replace(/^https?:\/\//i, "")
-    const parts = username.split("github.com")[1] || ""
-    username = parts.replace(/^\//, "").split("/")[0]
-  }
-  username = username.split(/[?#]/)[0].replace(/\/$/, "").trim()
-  return username
-}
 
 const formatApiError = (err: any): string => {
   if (!err) return "Something went wrong"
@@ -84,6 +70,7 @@ export default function Dashboard() {
   const [progressHistory, setProgressHistory] = useState<ProgressHistory[]>([])
   const [metricsLoading, setMetricsLoading] = useState(true)
   const [metricsError, setMetricsError] = useState<string | null>(null)
+  const [enterAnimationReady, setEnterAnimationReady] = useState(false)
 
   // Resume/Certificate upload states
   const [resumeFile, setResumeFile] = useState<File | null>(null)
@@ -165,6 +152,11 @@ export default function Dashboard() {
       router.push("/login")
     }
   }, [user, router])
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setEnterAnimationReady(true))
+    return () => cancelAnimationFrame(frame)
+  }, [])
 
   useEffect(() => {
     if (!user) return
@@ -316,7 +308,9 @@ export default function Dashboard() {
             <div className="absolute bottom-20 right-10 w-72 h-72 bg-accent/10 rounded-full blur-3xl opacity-20" />
           </div>
 
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+          <div
+            className={`max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8 transform transition-all duration-700 ease-out ${enterAnimationReady ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"}`}
+          >
             {/* Header */}
             <div className="space-y-2">
               <h1 className="text-4xl font-bold gradient-text">Welcome back, {user.name}! 👋</h1>
@@ -767,44 +761,8 @@ export default function Dashboard() {
                   </div>
                   {metricsLoading ? (
                     <div className="h-[300px] rounded-lg bg-white/5 animate-pulse" />
-                  ) : hasActivityData ? (
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={activityChartData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                        <XAxis dataKey="date" stroke="rgba(255,255,255,0.5)" />
-                        <YAxis stroke="rgba(255,255,255,0.5)" />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "rgba(12,12,30,0.8)",
-                            border: "1px solid rgba(255,255,255,0.2)",
-                          }}
-                        />
-                        <Legend />
-                        <Line
-                          type="monotone"
-                          dataKey="problems"
-                          stroke="oklch(0.60 0.25 280)"
-                          dot={{ fill: "oklch(0.60 0.25 280)" }}
-                          name="Problems"
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="tests"
-                          stroke="oklch(0.70 0.20 140)"
-                          dot={{ fill: "oklch(0.70 0.20 140)" }}
-                          name="Tests"
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="interviews"
-                          stroke="oklch(0.72 0.17 70)"
-                          dot={{ fill: "oklch(0.72 0.17 70)" }}
-                          name="Interviews"
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
                   ) : (
-                    <p className="text-sm text-muted-foreground">No activity recorded yet.</p>
+                    <p className="text-sm text-muted-foreground">No quiz activity recorded yet.</p>
                   )}
                 </div>
               </Card>

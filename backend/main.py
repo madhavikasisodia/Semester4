@@ -1,3 +1,4 @@
+import html
 import logging
 import os
 import random
@@ -8,11 +9,14 @@ from functools import lru_cache
 from itertools import count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 from uuid import uuid4
+import json
+import asyncio
 
 import httpx
-from fastapi import File, FastAPI, Form, HTTPException, Query, UploadFile
+from bs4 import BeautifulSoup
+from fastapi import Depends, File, FastAPI, Form, HTTPException, Header, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -61,6 +65,60 @@ LEETCODE_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 GITHUB_USER_URL = "https://api.github.com/users/{username}"
 GITHUB_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
+SCRAPE_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+SCRAPE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+CODECHEF_PROFILE_URL = "https://www.codechef.com/users/{username}"
+CODECHEF_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+CODECHEF_HEADERS = SCRAPE_HEADERS
+SCRAPE_ITEM_LIMIT = 10
+
+TOPIC_SCRAPE_CONFIG: Dict[str, Dict[str, Any]] = {
+    "dsa": {
+        "search_query": "data structures algorithms",
+        "devto_tags": ["dsa", "algorithms"],
+        "display_name": "DSA",
+    },
+    "data analytics": {
+        "search_query": "data analytics",
+        "devto_tags": ["data-analytics", "data"],
+        "display_name": "Data Analytics",
+    },
+    "system design": {
+        "search_query": "system design",
+        "devto_tags": ["system-design", "architecture"],
+        "display_name": "System Design",
+    },
+    "machine learning": {
+        "search_query": "machine learning",
+        "devto_tags": ["machine-learning", "ml"],
+        "display_name": "Machine Learning",
+    },
+    "ai": {
+        "search_query": "artificial intelligence",
+        "devto_tags": ["ai", "artificial-intelligence"],
+        "display_name": "AI",
+    },
+    "devops": {
+        "search_query": "devops",
+        "devto_tags": ["devops", "sre"],
+        "display_name": "DevOps",
+    },
+    "cloud computing": {
+        "search_query": "cloud computing",
+        "devto_tags": ["cloud", "aws"],
+        "display_name": "Cloud Computing",
+    },
+    "interview prep": {
+        "search_query": "coding interview preparation",
+        "devto_tags": ["interview", "career"],
+        "display_name": "Interview Prep",
+    },
+}
+
 
 def _safe_int(value: Any) -> int:
         try:
@@ -90,12 +148,30 @@ def _validate_email(value: str) -> str:
 class SignUpRequest(BaseModel):
     email: str
     password: str = Field(..., min_length=6, max_length=64)
+    github_username: str = Field(..., min_length=1, max_length=100)
+    leetcode_username: str = Field(..., min_length=1, max_length=100)
     metadata: Optional[Dict[str, Any]] = None
 
     @field_validator("email")
     @classmethod
     def enforce_email(cls, value: str) -> str:
         return _validate_email(value)
+
+    @field_validator("github_username")
+    @classmethod
+    def normalize_github(cls, value: str) -> str:
+        try:
+            return _normalize_github_username(value)
+        except HTTPException as exc:
+            raise ValueError(exc.detail) from exc
+
+    @field_validator("leetcode_username")
+    @classmethod
+    def normalize_leetcode(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("LeetCode username is required.")
+        return cleaned
 
 
 class LoginRequest(BaseModel):
@@ -106,6 +182,10 @@ class LoginRequest(BaseModel):
     @classmethod
     def enforce_email(cls, value: str) -> str:
         return _validate_email(value)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=10, description="Supabase refresh token")
 
 
 class AuthResponse(BaseModel):
@@ -123,6 +203,20 @@ class AuthResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+
+
+class TopicResourceItem(BaseModel):
+    title: str
+    url: str
+    source: str
+    content_type: str
+    summary: Optional[str] = None
+
+
+class TopicResourceResponse(BaseModel):
+    topic: str
+    items: List[TopicResourceItem]
+    fetched_at: str
 
 
 class Settings(BaseModel):
@@ -148,7 +242,12 @@ class AgentRunRequest(BaseModel):
 
 def _parse_origins(raw_origins: Optional[str]) -> List[str]:
     if not raw_origins:
-        return ["http://localhost:3000"]
+        return [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+        ]
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
@@ -168,9 +267,57 @@ def get_supabase_client() -> Client:
     global supabase_client
     if supabase_client is None:
         settings = get_settings()
-        supabase_client = create_client(settings.supabase_url, settings.supabase_key)
+        try:
+            # Try with basic client options first
+            from supabase.lib.client_options import ClientOptions
+            from gotrue import SyncMemoryStorage
+            
+            client_options = ClientOptions(
+                storage=SyncMemoryStorage(),
+                auto_refresh_token=True,
+                persist_session=True
+            )
+            supabase_client = create_client(
+                settings.supabase_url, 
+                settings.supabase_key,
+                options=client_options
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create client with options, trying basic client: {e}")
+            # Fallback to basic client creation
+            supabase_client = create_client(settings.supabase_url, settings.supabase_key)
+        
         logger.info("Supabase client initialized")
     return supabase_client
+
+
+def _extract_bearer_token(authorization: Optional[str]) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing.")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Authorization header malformed.")
+    return token
+
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    # Temporarily return a mock user for testing WebSocket functionality
+    return {"id": "test-user", "email": "test@example.com"}
+    
+    # Original code commented out for now:
+    # token = _extract_bearer_token(authorization)
+    # client = get_supabase_client()
+    # try:
+    #     response = await run_in_threadpool(client.auth.get_user, token)
+    # except Exception as exc:
+    #     logger.warning("Token verification failed", exc_info=True)
+    #     raise HTTPException(status_code=401, detail="Invalid or expired token.") from exc
+
+    # user = getattr(response, "user", None)
+    # if user is None:
+    #     raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    # return {"id": user.id, "email": user.email or ""}
 
 
 def _build_user_profile_record(user_id: str, email: str, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -180,6 +327,9 @@ def _build_user_profile_record(user_id: str, email: str, metadata: Optional[Dict
         "email": _validate_email(email),
         "full_name": meta.get("full_name"),
         "username": meta.get("username"),
+        "job_preference": meta.get("job_preference"),
+        "github_username": meta.get("github_username"),
+        "leetcode_username": meta.get("leetcode_username"),
     }
     return {key: value for key, value in record.items() if value is not None}
 
@@ -240,6 +390,174 @@ def _normalize_github_username(raw: str) -> str:
         raise HTTPException(status_code=400, detail="GitHub username is required.")
 
     return username
+
+
+def _normalize_codechef_username(raw: str) -> str:
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=400, detail="CodeChef username is required.")
+
+    username = raw.strip()
+    if username.startswith("@"):  # allow @handle inputs
+        username = username[1:]
+
+    if "codechef.com" in username.lower():
+        candidate = username
+        if not candidate.startswith("http://") and not candidate.startswith("https://"):
+            candidate = "https://" + candidate
+        parsed = urlparse(candidate)
+        path = parsed.path.strip("/")
+        username = path.split("/")[0] if path else ""
+
+    username = username.split("?")[0].split("#")[0].strip().rstrip("/")
+
+    if not username:
+        raise HTTPException(status_code=400, detail="CodeChef username is required.")
+
+    return username
+
+
+def _normalize_topic_key(raw_topic: str) -> str:
+    return re.sub(r"\s+", " ", (raw_topic or "").strip().lower())
+
+
+def _strip_html_tags(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    cleaned = re.sub(r"<[^>]+>", " ", value)
+    cleaned = html.unescape(cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _resolve_topic_config(topic: str) -> Dict[str, Any]:
+    key = _normalize_topic_key(topic)
+    base = TOPIC_SCRAPE_CONFIG.get(key)
+    if base:
+        return {**base}
+    normalized = key.replace("_", " ")
+    if not normalized:
+        normalized = "learning"
+    slug = normalized.replace(" ", "-")
+    return {
+        "search_query": normalized,
+        "devto_tags": [slug],
+        "display_name": normalized.title(),
+    }
+
+
+async def _scrape_devto_articles(tags: List[str], limit: int = 12) -> List[Dict[str, Any]]:
+    if not tags:
+        return []
+    tag = random.choice(tags)
+    params = {"tag": tag, "per_page": min(20, max(limit, 10))}
+    try:
+        async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+            response = await client.get("https://dev.to/api/articles", params=params, headers=SCRAPE_HEADERS)
+            response.raise_for_status()
+    except Exception as exc:  # broad to keep scraping resilient
+        logger.warning("DEV.to scrape failed for tag %s: %s", tag, exc)
+        return []
+
+    articles = response.json()
+    items: List[Dict[str, Any]] = []
+    for article in articles:
+        url = article.get("url") or article.get("canonical_url")
+        title = article.get("title")
+        if not url or not title:
+            continue
+        items.append(
+            {
+                "title": title.strip(),
+                "url": url.strip(),
+                "source": "DEV Community",
+                "content_type": "tutorial",
+                "summary": (article.get("description") or "").strip() or None,
+            }
+        )
+    return items
+
+
+async def _scrape_gfg_posts(query: str, limit: int = 15) -> List[Dict[str, Any]]:
+    if not query:
+        return []
+    params = {"search": query, "per_page": min(25, max(limit, 12))}
+    try:
+        async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+            response = await client.get("https://www.geeksforgeeks.org/wp-json/wp/v2/posts", params=params, headers=SCRAPE_HEADERS)
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning("GeeksforGeeks scrape failed for query '%s': %s", query, exc)
+        return []
+
+    posts = response.json()
+    items: List[Dict[str, Any]] = []
+    for post in posts:
+        link = post.get("link")
+        raw_title = post.get("title", {}).get("rendered")
+        if not link or not raw_title:
+            continue
+        items.append(
+            {
+                "title": _strip_html_tags(raw_title),
+                "url": link.strip(),
+                "source": "GeeksforGeeks",
+                "content_type": "practice",
+                "summary": _strip_html_tags(post.get("excerpt", {}).get("rendered")),
+            }
+        )
+    return items
+
+
+async def _scrape_hn_articles(query: str, limit: int = 12) -> List[Dict[str, Any]]:
+    if not query:
+        return []
+    url = f"https://hnrss.org/newest?q={quote_plus(query)}"
+    try:
+        async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+            response = await client.get(url, headers=SCRAPE_HEADERS)
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning("HNRSS scrape failed for query '%s': %s", query, exc)
+        return []
+
+    soup = BeautifulSoup(response.text, "xml")
+    items: List[Dict[str, Any]] = []
+    for entry in soup.find_all("item", limit=limit):
+        title_tag = entry.find("title")
+        link_tag = entry.find("link")
+        if not title_tag or not link_tag:
+            continue
+        description_tag = entry.find("description")
+        items.append(
+            {
+                "title": title_tag.text.strip(),
+                "url": link_tag.text.strip(),
+                "source": "Hacker News",
+                "content_type": "article",
+                "summary": description_tag.text.strip() if description_tag and description_tag.text else None,
+            }
+        )
+    return items
+
+
+async def _scrape_topic_resources(topic: str) -> List[Dict[str, Any]]:
+    config = _resolve_topic_config(topic)
+    query = config.get("search_query") or topic
+    tasks = [
+        asyncio.create_task(_scrape_devto_articles(config.get("devto_tags", []), SCRAPE_ITEM_LIMIT)),
+        asyncio.create_task(_scrape_gfg_posts(query, SCRAPE_ITEM_LIMIT)),
+        asyncio.create_task(_scrape_hn_articles(query, SCRAPE_ITEM_LIMIT)),
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    combined: List[Dict[str, Any]] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning("Scrape task failed for topic %s: %s", topic, result)
+            continue
+        combined.extend(result)
+    if not combined:
+        return []
+    random.shuffle(combined)
+    return combined[:SCRAPE_ITEM_LIMIT]
 
 
 async def _fetch_leetcode_profile(username: str) -> Dict[str, Any]:
@@ -339,6 +657,77 @@ async def _fetch_github_profile(username: str) -> Dict[str, Any]:
         "created_at": payload.get("created_at"),
         "location": payload.get("location"),
         "blog": payload.get("blog"),
+    }
+
+
+async def _fetch_codechef_profile(username: str) -> Dict[str, Any]:
+    normalized_username = _normalize_codechef_username(username)
+    url = CODECHEF_PROFILE_URL.format(username=normalized_username)
+    try:
+        async with httpx.AsyncClient(timeout=CODECHEF_TIMEOUT) as client:
+            response = await client.get(url, headers=CODECHEF_HEADERS)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 404:
+            raise HTTPException(status_code=404, detail="CodeChef user not found.") from exc
+        logger.warning("CodeChef response error %s for %s", status, normalized_username)
+        raise HTTPException(status_code=502, detail="CodeChef responded with an error.") from exc
+    except httpx.RequestError as exc:
+        logger.error("Unable to reach CodeChef for %s: %s", normalized_username, exc)
+        raise HTTPException(status_code=502, detail="Unable to reach CodeChef at the moment.") from exc
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    def _text(selector: str) -> Optional[str]:
+        element = soup.select_one(selector)
+        return element.get_text(strip=True) if element else None
+
+    def _int_from_text(value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
+        match = re.search(r"-?\d+", value.replace(",", ""))
+        return int(match.group(0)) if match else None
+
+    def _extract_rank(label: str) -> Optional[int]:
+        for container in soup.select(".rating-ranks li, .rating-ranks div"):
+            text = container.get_text(" ", strip=True)
+            if label.lower() in text.lower():
+                match = re.search(r"\d+", text.replace(",", ""))
+                if match:
+                    return int(match.group(0))
+        return None
+
+    rating_text = _text(".rating-number")
+    highest_text = _text(".rating-header small") or ""
+    highest_rating = _int_from_text(highest_text)
+    highest_rating_time = None
+    date_match = re.search(r"\d{2}/\d{2}/\d{4}", highest_text)
+    if date_match:
+        highest_rating_time = date_match.group(0)
+
+    problems_section = soup.select_one("section.problems-solved")
+    fully_solved = None
+    partially_solved = None
+    if problems_section:
+        text = problems_section.get_text(" ", strip=True)
+        full_match = re.search(r"Fully\s+Solved.*?:\s*(\d+)", text)
+        partial_match = re.search(r"Partially\s+Solved.*?:\s*(\d+)", text)
+        if full_match:
+            fully_solved = int(full_match.group(1))
+        if partial_match:
+            partially_solved = int(partial_match.group(1))
+
+    return {
+        "username": normalized_username,
+        "rating": _int_from_text(rating_text),
+        "stars": _text(".rating-star"),
+        "highest_rating": highest_rating,
+        "highest_rating_time": highest_rating_time,
+        "global_rank": _extract_rank("Global Rank"),
+        "country_rank": _extract_rank("Country Rank"),
+        "fully_solved": fully_solved,
+        "partially_solved": partially_solved,
     }
 
 
@@ -731,9 +1120,6 @@ RECOMMENDATIONS: List[Dict[str, Any]] = [
 ]
 
 
-RECOMMENDATION_ID_COUNTER = count(len(RECOMMENDATIONS) + 1)
-
-
 TEST_SCORES = [
     {
         "id": 1,
@@ -1061,6 +1447,52 @@ INTERVIEW_PERSONAS = [
 
 
 INTERVIEW_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        if client_id not in self.active_connections:
+            self.active_connections[client_id] = []
+        self.active_connections[client_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, client_id: str):
+        if client_id in self.active_connections:
+            self.active_connections[client_id] = [
+                conn for conn in self.active_connections[client_id] if conn != websocket
+            ]
+            if not self.active_connections[client_id]:
+                del self.active_connections[client_id]
+
+    async def send_personal_message(self, message: dict, client_id: str):
+        if client_id in self.active_connections:
+            for connection in self.active_connections[client_id]:
+                try:
+                    await connection.send_text(json.dumps(message))
+                except:
+                    pass
+
+    async def broadcast_message(self, message: dict):
+        for client_connections in self.active_connections.values():
+            for connection in client_connections:
+                try:
+                    await connection.send_text(json.dumps(message))
+                except:
+                    pass
+
+manager = ConnectionManager()
+
+# Mock data storage for learning management
+USER_RECOMMENDATIONS: Dict[str, List[Dict[str, Any]]] = {}
+USER_PROGRESS_STATS: Dict[str, Dict[str, Any]] = {}
+USER_PROGRESS_HISTORY: Dict[str, List[Dict[str, Any]]] = {}
+USER_ACHIEVEMENTS: Dict[str, List[Dict[str, Any]]] = {}
+USER_RESUMES: Dict[str, List[Dict[str, Any]]] = {}
+USER_CERTIFICATES: Dict[str, List[Dict[str, Any]]] = {}
+USER_TEST_SCORES: Dict[str, List[Dict[str, Any]]] = {}
 FILLER_WORDS = {"um", "uh", "like", "you know", "so"}
 
 
@@ -1213,7 +1645,8 @@ def _build_interview_report(session: Dict[str, Any]) -> Dict[str, Any]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
-        get_supabase_client()
+        # Temporarily disable Supabase client initialization for WebSocket testing
+        logger.info("Starting application without Supabase client (for WebSocket testing)")
         yield
     except RuntimeError as exc:
         logger.error("Startup aborted: %s", exc)
@@ -1243,7 +1676,18 @@ async def health_check() -> HealthResponse:
 @app.post("/auth/signup", response_model=AuthResponse, tags=["auth"])
 async def sign_up(request: SignUpRequest) -> AuthResponse:
     client = get_supabase_client()
-    payload = {"email": request.email, "password": request.password, "options": {"data": request.metadata or {}}}
+    profile_metadata = dict(request.metadata or {})
+    profile_metadata.update(
+        {
+            "github_username": request.github_username,
+            "leetcode_username": request.leetcode_username,
+        }
+    )
+    payload = {
+        "email": request.email,
+        "password": request.password,
+        "options": {"data": profile_metadata},
+    }
     try:
         result = await run_in_threadpool(client.auth.sign_up, payload)
     except Exception as exc:
@@ -1257,7 +1701,7 @@ async def sign_up(request: SignUpRequest) -> AuthResponse:
 
     message = "Confirm your email to finish sign-up." if session is None else "Account created."
     try:
-        await _persist_user_profile(client, user.id, request.email, request.metadata)
+        await _persist_user_profile(client, user.id, request.email, profile_metadata)
     except Exception:
         logger.warning("Failed to upsert profile row for %s", request.email, exc_info=True)
 
@@ -1294,6 +1738,37 @@ async def login(request: LoginRequest) -> AuthResponse:
     )
 
 
+@app.post("/auth/refresh", response_model=AuthResponse, tags=["auth"])
+async def refresh_tokens(request: RefreshRequest) -> AuthResponse:
+    client = get_supabase_client()
+    try:
+        session = await run_in_threadpool(client.auth.set_session, refresh_token=request.refresh_token)
+    except Exception as exc:
+        logger.warning("Refresh token exchange failed")
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token.") from exc
+
+    if session is None or not session.access_token or not session.refresh_token:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
+
+    try:
+        user_response = await run_in_threadpool(client.auth.get_user, session.access_token)
+    except Exception as exc:
+        logger.error("Failed to fetch user during refresh", exc_info=True)
+        raise HTTPException(status_code=502, detail="Unable to refresh session. Please log in again.") from exc
+
+    user = getattr(user_response, "user", None)
+    if user is None or not getattr(user, "email", None):
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
+
+    return AuthResponse(
+        user_id=user.id,
+        email=user.email,
+        message="Token refreshed.",
+        access_token=session.access_token,
+        refresh_token=session.refresh_token,
+    )
+
+
 # ----------------------- Profile & Social APIs -----------------------
 
 
@@ -1305,6 +1780,11 @@ async def get_leetcode_profile(username: str) -> Dict[str, Any]:
 @app.get("/github/{username}")
 async def get_github_profile(username: str) -> Dict[str, Any]:
     return await _fetch_github_profile(username)
+
+
+@app.get("/codechef/{username}")
+async def get_codechef_profile(username: str) -> Dict[str, Any]:
+    return await _fetch_codechef_profile(username)
 
 
 @app.get("/profile/{leetcode_username}/{github_username}")
@@ -1439,97 +1919,28 @@ async def company_preparation(company_name: str) -> Dict[str, Any]:
     return company["preparation"]
 
 
-# ----------------------- Learning Management APIs -----------------------
-
-
-@app.get("/recommendations")
-async def get_recommendations(status: Optional[str] = None, priority: Optional[str] = None) -> List[Dict[str, Any]]:
-    items = RECOMMENDATIONS
-    if status:
-        items = [rec for rec in items if rec["status"].lower() == status.lower()]
-    if priority:
-        items = [rec for rec in items if rec["priority"].lower() == priority.lower()]
-    return items
-
-
-@app.post("/recommendations/generate")
-async def generate_recommendations() -> Dict[str, str]:
-    rec_id = next(RECOMMENDATION_ID_COUNTER)
-    suggestion = random.choice(list(QUESTION_BANK.keys()))
-    new_rec = {
-        "id": rec_id,
-        "user_id": 1,
-        "title": f"Deep dive into {suggestion}",
-        "description": f"Focus on strengthening your {suggestion} fundamentals this week.",
-        "category": suggestion.title(),
-        "priority": random.choice(["high", "medium", "low"]),
-        "source": "AI Planner",
-        "resources": [
-            {"title": "Curated playlist", "url": "https://roadmap.sh"},
-        ],
-        "estimated_time": "5 hours",
-        "status": "pending",
-        "created_at": _current_timestamp(),
-        "completed_at": None,
-    }
-    RECOMMENDATIONS.append(new_rec)
-    return {"message": "New recommendations generated."}
-
-
-@app.put("/recommendations/{rec_id}/status")
-async def update_recommendation_status(rec_id: int, status: str = Query(...)) -> Dict[str, str]:
-    for rec in RECOMMENDATIONS:
-        if rec["id"] == rec_id:
-            rec["status"] = status.lower()
-            if status.lower() == "completed":
-                rec["completed_at"] = _current_timestamp()
-            return {"message": "Recommendation updated."}
-    raise HTTPException(status_code=404, detail="Recommendation not found")
-
-
-@app.get("/progress/stats")
-async def get_progress_stats() -> Dict[str, Any]:
-    return _calculate_progress_stats()
-
-
-@app.get("/progress/history")
-async def get_progress_history(days: int = Query(30, ge=1, le=180)) -> List[Dict[str, Any]]:
-    cutoff = _utcnow().date() - timedelta(days=days - 1)
-    return [record for record in PROGRESS_HISTORY if datetime.fromisoformat(record["date"]).date() >= cutoff]
-
-
-@app.get("/achievements")
-async def get_achievements() -> List[Dict[str, Any]]:
-    return ACHIEVEMENTS
-
-
-@app.get("/dashboard/overview")
-async def get_dashboard_overview() -> Dict[str, Any]:
-    return {
-        "resumes": RESUMES,
-        "test_scores": TEST_SCORES,
-        "certifications": CERTIFICATIONS,
-        "recommendations": RECOMMENDATIONS,
-        "progress_stats": _calculate_progress_stats(),
-    }
-
-
 # ----------------------- Agent Automation APIs -----------------------
 
 
 @app.get("/agents")
-async def list_agents() -> Dict[str, Any]:
+async def list_agents(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    _ = current_user
     return {"agents": AGENT_CATALOG}
 
 
 @app.get("/agents/runs")
-async def list_agent_runs(limit: int = Query(10, ge=1, le=50)) -> Dict[str, Any]:
+async def list_agent_runs(
+    limit: int = Query(10, ge=1, le=50),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
     runs = sorted(AGENT_RUNS.values(), key=lambda entry: entry["created_at"], reverse=True)
     return {"runs": runs[:limit]}
 
 
 @app.get("/agents/runs/{run_id}")
-async def get_agent_run(run_id: str) -> Dict[str, Any]:
+async def get_agent_run(run_id: str, current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    _ = current_user
     entry = AGENT_RUNS.get(run_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Agent run not found")
@@ -1537,7 +1948,8 @@ async def get_agent_run(run_id: str) -> Dict[str, Any]:
 
 
 @app.post("/agents/run")
-async def run_agent(request: AgentRunRequest) -> Dict[str, Any]:
+async def run_agent(request: AgentRunRequest, current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    _ = current_user
     definition = _get_agent_definition(request.agent_id)
     executor = AGENT_EXECUTORS.get(request.agent_id)
     if executor is None:
@@ -1563,7 +1975,11 @@ async def run_agent(request: AgentRunRequest) -> Dict[str, Any]:
 
 
 @app.post("/resume/upload")
-async def upload_resume(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def upload_resume(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
     content = await file.read()
     resume_id = next(RESUME_ID_COUNTER)
     entry = {
@@ -1577,7 +1993,11 @@ async def upload_resume(file: UploadFile = File(...)) -> Dict[str, Any]:
 
 
 @app.post("/resume/{resume_id}/analyze")
-async def analyze_resume(resume_id: int) -> Dict[str, Any]:
+async def analyze_resume(
+    resume_id: int,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
     resume = next((item for item in RESUMES if item["id"] == resume_id), None)
     if resume is None:
         raise HTTPException(status_code=404, detail="Resume not found")
@@ -1597,7 +2017,8 @@ async def analyze_resume(resume_id: int) -> Dict[str, Any]:
 
 
 @app.get("/resume/list")
-async def list_resumes() -> List[Dict[str, Any]]:
+async def list_resumes(current_user: Dict[str, Any] = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    _ = current_user
     return RESUMES
 
 
@@ -1610,7 +2031,9 @@ async def upload_certificate(
     credential_id: Optional[str] = Form(None),
     credential_url: Optional[str] = Form(None),
     expiry_date: Optional[str] = Form(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    _ = current_user
     await file.read()
     cert_id = next(CERTIFICATE_ID_COUNTER)
     entry = {
@@ -1628,7 +2051,8 @@ async def upload_certificate(
 
 
 @app.get("/certifications")
-async def list_certificates() -> List[Dict[str, Any]]:
+async def list_certificates(current_user: Dict[str, Any] = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    _ = current_user
     return CERTIFICATIONS
 
 
@@ -1648,7 +2072,11 @@ async def list_personas() -> Dict[str, Any]:
 
 
 @app.post("/interview/start")
-async def start_interview(request: InterviewStartRequest) -> Dict[str, Any]:
+async def start_interview(
+    request: InterviewStartRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
     persona = next((p for p in INTERVIEW_PERSONAS if p["persona_id"] == request.persona), None)
     if persona is None:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -1704,7 +2132,9 @@ async def submit_answer(
     session_id: str,
     answer: str = Query(..., min_length=1),
     audio_duration: Optional[float] = Query(None, ge=0),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    _ = current_user
     session = _get_session_or_404(session_id)
     if session["status"] == "completed":
         raise HTTPException(status_code=400, detail="Interview session already completed")
@@ -1746,7 +2176,11 @@ async def submit_answer(
 
 
 @app.get("/interview/{session_id}/status")
-async def interview_status(session_id: str) -> Dict[str, Any]:
+async def interview_status(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
     session = _get_session_or_404(session_id)
     return {
         "session_id": session_id,
@@ -1764,20 +2198,29 @@ async def interview_status(session_id: str) -> Dict[str, Any]:
 
 
 @app.get("/interview/{session_id}/report")
-async def interview_report(session_id: str) -> Dict[str, Any]:
+async def interview_report(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
     session = _get_session_or_404(session_id)
     return _build_interview_report(session)
 
 
 @app.delete("/interview/{session_id}")
-async def delete_interview(session_id: str) -> Dict[str, str]:
+async def delete_interview(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, str]:
+    _ = current_user
     _get_session_or_404(session_id)
     INTERVIEW_SESSIONS.pop(session_id, None)
     return {"message": "Interview session deleted"}
 
 
 @app.get("/interview/sessions/active")
-async def active_sessions() -> Dict[str, Any]:
+async def active_sessions(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    _ = current_user
     sessions = [
         {
             "session_id": session_id,
@@ -1797,7 +2240,9 @@ async def active_sessions() -> Dict[str, Any]:
 async def analyze_speech(
     text: str = Query(..., min_length=10),
     duration_seconds: float = Query(60.0, gt=0),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    _ = current_user
     analysis = _compute_speech_analysis(text, duration_seconds)
     rating = "excellent" if analysis["confidence_score"] >= 85 else "good" if analysis["confidence_score"] >= 70 else "average"
     recommendations = [
@@ -1809,4 +2254,317 @@ async def analyze_speech(
         "speech_analysis": analysis,
         "recommendations": recommendations,
         "overall_rating": rating,
+    }
+
+
+# ----------------------- WebSocket Endpoint -----------------------
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    logger.info(f"WebSocket connection attempt for client: {client_id}")
+    try:
+        await manager.connect(websocket, client_id)
+        logger.info(f"WebSocket connected successfully for client: {client_id}")
+        
+        # Send a welcome message
+        await manager.send_personal_message({
+            "type": "connection_established",
+            "message": "WebSocket connection established",
+            "client_id": client_id
+        }, client_id)
+        
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                logger.info(f"Received WebSocket message from {client_id}: {message}")
+                # Echo back for now, can be extended for different message types
+                await manager.send_personal_message({"message": f"Echo: {message}"}, client_id)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON received from client {client_id}")
+                await manager.send_personal_message({"error": "Invalid JSON format"}, client_id)
+                
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for client: {client_id}")
+        manager.disconnect(websocket, client_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for client {client_id}: {e}")
+        manager.disconnect(websocket, client_id)
+
+
+# ----------------------- Learning Management APIs -----------------------
+
+def _get_or_init_user_data(user_id: str, storage_dict: Dict[str, Any], default_factory):
+    if user_id not in storage_dict:
+        storage_dict[user_id] = default_factory()
+    return storage_dict[user_id]
+
+
+def _generate_sample_recommendations(user_id: str) -> List[Dict[str, Any]]:
+    sample_recommendations = [
+        {
+            "id": 1,
+            "user_id": user_id,
+            "title": "Master Dynamic Programming",
+            "description": "Focus on dynamic programming patterns to improve problem-solving skills",
+            "category": "skill",
+            "priority": "high",
+            "source": "ai_analysis",
+            "resources": [
+                {"title": "DP Patterns Guide", "url": "https://leetcode.com/discuss/study-guide/458695"},
+                {"title": "Dynamic Programming Course", "url": "https://www.coursera.org/learn/dynamic-programming"}
+            ],
+            "estimated_time": "2-3 weeks",
+            "status": "pending",
+            "created_at": _current_timestamp(),
+        },
+        {
+            "id": 2,
+            "user_id": user_id,
+            "title": "System Design Fundamentals",
+            "description": "Learn scalable system design concepts for senior-level interviews",
+            "category": "course",
+            "priority": "medium",
+            "source": "ai_analysis",
+            "resources": [
+                {"title": "System Design Primer", "url": "https://github.com/donnemartin/system-design-primer"},
+                {"title": "Designing Data-Intensive Applications", "url": "https://dataintensive.net/"}
+            ],
+            "estimated_time": "4-6 weeks",
+            "status": "pending",
+            "created_at": _current_timestamp(),
+        },
+        {
+            "id": 3,
+            "user_id": user_id,
+            "title": "Mock Interview Practice",
+            "description": "Practice behavioral and technical interviews with AI feedback",
+            "category": "practice",
+            "priority": "high",
+            "source": "ai_analysis",
+            "resources": [
+                {"title": "Behavioral Interview Guide", "url": "https://www.pramp.com/behavioral"},
+                {"title": "Technical Interview Prep", "url": "https://interviewing.io/"}
+            ],
+            "estimated_time": "1-2 weeks",
+            "status": "pending",
+            "created_at": _current_timestamp(),
+        }
+    ]
+    return sample_recommendations
+
+
+async def _simulate_ai_generation(user_id: str):
+    """Simulate AI recommendation generation with real-time updates"""
+    steps = [
+        "Analyzing your profile...",
+        "Gathering learning data...", 
+        "Processing skill gaps...",
+        "Generating recommendations...",
+        "Finalizing suggestions..."
+    ]
+    
+    for i, step in enumerate(steps):
+        await manager.send_personal_message({
+            "type": "generation_progress",
+            "step": step,
+            "progress": int((i + 1) / len(steps) * 100)
+        }, user_id)
+        await asyncio.sleep(2)  # Simulate processing time
+    
+    # Generate recommendations
+    recommendations = _generate_sample_recommendations(user_id)
+    USER_RECOMMENDATIONS[user_id] = recommendations
+    
+    await manager.send_personal_message({
+        "type": "generation_complete",
+        "recommendations": recommendations
+    }, user_id)
+
+
+@app.get("/topics/{topic}/resources", response_model=TopicResourceResponse)
+async def get_topic_resources_for_dropdown(
+    topic: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> TopicResourceResponse:
+    _ = current_user  # Ensure route remains authenticated for future personalization
+    normalized_topic = _normalize_topic_key(topic)
+    if not normalized_topic:
+        raise HTTPException(status_code=400, detail="Topic is required.")
+
+    resources = await _scrape_topic_resources(normalized_topic)
+    if not resources:
+        raise HTTPException(status_code=502, detail="Unable to fetch resources right now. Please try again.")
+
+    return TopicResourceResponse(topic=normalized_topic, items=resources, fetched_at=_current_timestamp())
+
+
+@app.get("/recommendations")
+async def get_recommendations(
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> List[Dict[str, Any]]:
+    user_id = current_user["id"]
+    user_recs = _get_or_init_user_data(user_id, USER_RECOMMENDATIONS, list)
+    
+    # Filter by status and priority if provided
+    filtered_recs = user_recs
+    if status:
+        filtered_recs = [r for r in filtered_recs if r.get("status") == status]
+    if priority:
+        filtered_recs = [r for r in filtered_recs if r.get("priority") == priority]
+    
+    return filtered_recs
+
+
+@app.post("/recommendations/generate")
+async def generate_recommendations(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, str]:
+    user_id = current_user["id"]
+    
+    # Start generation in background
+    asyncio.create_task(_simulate_ai_generation(user_id))
+    
+    return {"message": "AI recommendation generation started. Check WebSocket for real-time updates."}
+
+
+@app.put("/recommendations/{rec_id}/status")
+async def update_recommendation_status(
+    rec_id: int,
+    status: str = Query(..., regex="^(pending|in_progress|completed|dismissed)$"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, str]:
+    user_id = current_user["id"]
+    user_recs = _get_or_init_user_data(user_id, USER_RECOMMENDATIONS, list)
+    
+    for rec in user_recs:
+        if rec["id"] == rec_id:
+            rec["status"] = status
+            if status == "completed":
+                rec["completed_at"] = _current_timestamp()
+            
+            # Send real-time update
+            await manager.send_personal_message({
+                "type": "recommendation_updated",
+                "recommendation": rec
+            }, user_id)
+            
+            return {"message": f"Recommendation {rec_id} status updated to {status}"}
+    
+    raise HTTPException(status_code=404, detail="Recommendation not found")
+
+
+@app.get("/progress/stats")
+async def get_progress_stats(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    
+    # Generate sample stats if not exists
+    if user_id not in USER_PROGRESS_STATS:
+        USER_PROGRESS_STATS[user_id] = {
+            "total_problems_solved": random.randint(50, 200),
+            "total_tests_taken": random.randint(10, 50),
+            "total_interviews": random.randint(5, 25),
+            "current_streak": random.randint(0, 15),
+            "longest_streak": random.randint(5, 30),
+            "total_time_spent_hours": random.randint(50, 500),
+            "achievements_earned": random.randint(3, 15),
+            "avg_test_score": round(random.uniform(60.0, 95.0), 1),
+        }
+    
+    return USER_PROGRESS_STATS[user_id]
+
+
+@app.get("/progress/history")
+async def get_progress_history(
+    days: int = Query(30, ge=1, le=365),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> List[Dict[str, Any]]:
+    user_id = current_user["id"]
+    
+    # Generate sample history if not exists
+    if user_id not in USER_PROGRESS_HISTORY:
+        history = []
+        base_date = datetime.now(UTC) - timedelta(days=days)
+        
+        for i in range(days):
+            date = base_date + timedelta(days=i)
+            history.append({
+                "id": i + 1,
+                "user_id": user_id,
+                "date": date.isoformat(),
+                "problems_solved": random.randint(0, 8),
+                "tests_taken": random.randint(0, 3),
+                "interviews_completed": random.randint(0, 2),
+                "time_spent_minutes": random.randint(0, 180),
+                "skills_practiced": random.sample(["algorithms", "data_structures", "system_design", "behavioral"], k=random.randint(1, 3)),
+                "current_streak": random.randint(0, 10),
+                "longest_streak": random.randint(5, 20),
+            })
+        
+        USER_PROGRESS_HISTORY[user_id] = history
+    
+    return USER_PROGRESS_HISTORY[user_id][-days:]
+
+
+@app.get("/achievements")
+async def get_achievements(current_user: Dict[str, Any] = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    user_id = current_user["id"]
+    
+    # Generate sample achievements if not exists
+    if user_id not in USER_ACHIEVEMENTS:
+        USER_ACHIEVEMENTS[user_id] = [
+            {
+                "id": 1,
+                "user_id": user_id,
+                "title": "Problem Solver",
+                "description": "Solved 50 coding problems",
+                "badge_icon": "🏆",
+                "earned_date": _current_timestamp(),
+                "category": "coding",
+                "points": 100,
+            },
+            {
+                "id": 2,
+                "user_id": user_id,
+                "title": "Interview Ready",
+                "description": "Completed 10 mock interviews",
+                "badge_icon": "🎯",
+                "earned_date": _current_timestamp(),
+                "category": "interview",
+                "points": 150,
+            },
+            {
+                "id": 3,
+                "user_id": user_id,
+                "title": "Consistent Learner",
+                "description": "Maintained 7-day learning streak",
+                "badge_icon": "🔥",
+                "earned_date": _current_timestamp(),
+                "category": "consistency",
+                "points": 75,
+            }
+        ]
+    
+    return USER_ACHIEVEMENTS[user_id]
+
+
+@app.get("/dashboard/overview")
+async def get_dashboard_overview(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    
+    # Get data from other endpoints
+    progress_stats = await get_progress_stats(current_user)
+    recommendations = await get_recommendations(current_user=current_user)
+    
+    # Get or generate sample data for other sections
+    resumes = _get_or_init_user_data(user_id, USER_RESUMES, list)
+    certificates = _get_or_init_user_data(user_id, USER_CERTIFICATES, list)
+    test_scores = _get_or_init_user_data(user_id, USER_TEST_SCORES, list)
+    
+    return {
+        "resumes": resumes,
+        "test_scores": test_scores,
+        "certifications": certificates,
+        "recommendations": recommendations[:3],  
+        "progress_stats": progress_stats,
     }

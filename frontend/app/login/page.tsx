@@ -10,9 +10,10 @@ import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 import { useAuthStore } from "@/lib/store"
 import { formatApiError } from "@/lib/utils"
+import { authAPI } from "@/lib/api"
 import { toast } from "sonner"
 import Link from "next/link"
-import { ArrowLeft, Brain } from "lucide-react"
+import { ArrowLeft } from "lucide-react"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -32,42 +33,27 @@ export default function LoginPage() {
         return
       }
 
-      // Call real backend login endpoint
-      const response = await fetch('http://localhost:8000/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email, password }),
-      })
+      const data = await authAPI.login({ email, password })
 
-      const data = await response.json()
-
-      if (response.ok) {
-        // Save real JWT token
+      if (data.access_token) {
         localStorage.setItem("auth_token", data.access_token)
-        
-        // Set user in store
-        const mockUser = {
-          id: Math.random().toString(36).substr(2, 9),
-          email,
-          name: email.split("@")[0],
-          role: "student" as const,
-        }
-        setUser(mockUser)
-        
-        toast.success("Login successful!")
-        router.push("/dashboard")
-      } else {
-        // Handle specific error messages from backend
-        const apiMessage = formatApiError(
-          data?.detail ?? data?.message ?? data,
-          "Login failed",
-        )
-        toast.error(apiMessage)
       }
+      if (data.refresh_token) {
+        localStorage.setItem("refresh_token", data.refresh_token)
+      }
+
+      const authenticatedUser = {
+        id: data.user_id,
+        email: data.email,
+        name: data.email.split("@")[0],
+        role: "student" as const,
+      }
+      setUser(authenticatedUser)
+
+      toast.success(data.message || "Login successful!")
+      router.push("/dashboard")
     } catch (error: any) {
-      toast.error(error.message || "Login failed. Please check your connection.")
+      toast.error(formatApiError(error, "Login failed"))
     } finally {
       setLoading(false)
     }
@@ -93,12 +79,7 @@ export default function LoginPage() {
             </Link>
 
             <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-lg bg-gradient-to-br from-primary to-accent glow">
-                  <Brain className="w-5 h-5 text-foreground" />
-                </div>
-                <h1 className="text-2xl font-bold gradient-text">Welcome Back</h1>
-              </div>
+              <h1 className="text-2xl font-bold gradient-text">Welcome Back</h1>
               <p className="text-sm text-muted-foreground">Sign in to your account to continue</p>
             </div>
 

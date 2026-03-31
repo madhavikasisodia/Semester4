@@ -3,13 +3,18 @@
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { useAuthStore } from "@/lib/store"
-import { Brain, LogOut, Menu, X } from "lucide-react"
-import { useState } from "react"
+import { LogOut, Menu, X } from "lucide-react"
+import { useState, useEffect } from "react"
 import { ThemeToggle } from "@/components/theme-toggle"
 
 export function Navbar() {
   const { user, logout } = useAuthStore()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   const navLinks = [
     { href: "/dashboard", label: "Dashboard" },
@@ -22,13 +27,10 @@ export function Navbar() {
     <nav className="fixed top-0 w-full z-50 glass-dark border-b">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 group">
-          <div className="p-2 rounded-lg bg-gradient-to-br from-primary to-accent glow">
-            <Brain className="w-5 h-5 text-foreground" />
-          </div>
           <span className="font-bold text-lg gradient-text">EduNerve</span>
         </Link>
 
-        {user ? (
+        {mounted && user ? (
           <>
             {/* Desktop Navigation */}
             <div className="hidden md:flex items-center gap-6">
@@ -73,7 +75,7 @@ export function Navbar() {
               </Button>
             </div>
           </>
-        ) : (
+        ) : mounted ? (
           <div className="flex items-center gap-3">
             {/* Theme Toggle */}
             <ThemeToggle />
@@ -89,11 +91,16 @@ export function Navbar() {
               </Button>
             </Link>
           </div>
+        ) : (
+          // Fallback for when not mounted yet - prevents hydration mismatch
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+          </div>
         )}
       </div>
 
       {/* Mobile Menu */}
-      {user && menuOpen && (
+      {mounted && user && menuOpen && (
         <div className="md:hidden border-t bg-background">
           <div className="px-4 py-4 space-y-3">
             {navLinks.map((link) => (

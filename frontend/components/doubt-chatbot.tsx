@@ -104,7 +104,7 @@ export function DoubtChatbot() {
       {/* Floating Chat Button */}
       {!isOpen && (
         <Button
-          onClick={() => setIsOpen(true)}
+          onClick={() => window.open("https://codearc.pages.dev/", "_blank", "noopener,noreferrer")}
           className="fixed bottom-6 right-6 h-14 w-14 rounded-full shadow-lg hover:scale-110 transition-transform z-50"
           size="icon"
         >

@@ -8,11 +8,25 @@ import { Navbar } from "@/components/navbar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select"
 import { useAuthStore } from "@/lib/store"
 import { formatApiError } from "@/lib/utils"
+import { authAPI } from "@/lib/api"
 import { toast } from "sonner"
 import Link from "next/link"
-import { ArrowLeft, Brain } from "lucide-react"
+import { ArrowLeft } from "lucide-react"
+
+const JOB_OPTIONS = [
+  { value: "software-developer", label: "Software Developer" },
+  { value: "data-scientist", label: "Data Scientist" },
+  { value: "web-developer", label: "Web Developer" },
+  { value: "cybersecurity-analyst", label: "Cybersecurity Analyst" },
+  { value: "database-administrator", label: "Database Administrator" },
+  { value: "network-administrator", label: "Network Administrator" },
+  { value: "it-consultant", label: "IT Consultant" },
+  { value: "game-developer", label: "Game Developer" },
+  { value: "ai-ml-engineer", label: "AI/ML Engineer" },
+]
 
 export default function SignupPage() {
   const router = useRouter()
@@ -22,6 +36,7 @@ export default function SignupPage() {
     password: "",
     name: "",
     confirmPassword: "",
+    jobPreference: "",
   })
   const [loading, setLoading] = useState(false)
 
@@ -43,50 +58,50 @@ export default function SignupPage() {
       return
     }
 
+    if (!formData.jobPreference) {
+      toast.error("Select your job preference")
+      return
+    }
+
     setLoading(true)
 
     try {
-      // Call real backend register endpoint
-      const response = await fetch('http://localhost:8000/auth/register', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
+      const payload = {
+        email: formData.email,
+        password: formData.password,
+        metadata: {
+          username: formData.email.split("@")[0],
+          full_name: formData.name,
+          job_preference: formData.jobPreference,
         },
-        body: JSON.stringify({
-          email: formData.email,
-          username: formData.email.split('@')[0], // Use email prefix as username
-          password: formData.password,
-          full_name: formData.name
-        })
-      })
-
-      const data = await response.json()
-
-      if (response.ok) {
-        // Save real JWT token
-        localStorage.setItem("auth_token", data.access_token)
-        
-        // Set user in store
-        const newUser = {
-          id: Math.random().toString(36).substr(2, 9),
-          email: formData.email,
-          name: formData.name,
-          role: "student" as const,
-        }
-        setUser(newUser)
-        
-        toast.success("Account created successfully!")
-        router.push("/dashboard")
-      } else {
-        // Handle specific error messages from backend
-        const apiMessage = formatApiError(
-          data?.detail ?? data?.message ?? data,
-          "Signup failed",
-        )
-        toast.error(apiMessage)
       }
+
+      const data = await authAPI.signup(payload)
+
+      if (data.access_token) {
+        localStorage.setItem("auth_token", data.access_token)
+      }
+      if (data.refresh_token) {
+        localStorage.setItem("refresh_token", data.refresh_token)
+      }
+
+      const newUser = {
+        id: data.user_id,
+        email: data.email,
+        name: formData.name || data.email.split("@")[0],
+        role: "student" as const,
+        jobPreference: formData.jobPreference,
+      }
+      setUser(newUser)
+
+      const successMessage = data.access_token
+        ? "Account created successfully!"
+        : "Account created. Please confirm your email to continue."
+      toast.success(successMessage)
+
+      router.push(data.access_token ? "/dashboard" : "/login")
     } catch (error: any) {
-      toast.error(error.message || "Signup failed. Please check your connection.")
+      toast.error(formatApiError(error, "Signup failed"))
     } finally {
       setLoading(false)
     }
@@ -112,12 +127,7 @@ export default function SignupPage() {
             </Link>
 
             <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-lg bg-gradient-to-br from-primary to-accent glow">
-                  <Brain className="w-5 h-5 text-foreground" />
-                </div>
-                <h1 className="text-2xl font-bold gradient-text">Join EduNerve</h1>
-              </div>
+              <h1 className="text-2xl font-bold gradient-text">Join EduNerve</h1>
               <p className="text-sm text-muted-foreground">Start your learning journey today</p>
             </div>
 
@@ -127,7 +137,6 @@ export default function SignupPage() {
                 <Input
                   type="text"
                   name="name"
-                  placeholder="John Doe"
                   value={formData.name}
                   onChange={handleChange}
                   className="mt-2 bg-white/5 border-white/20"
@@ -140,7 +149,6 @@ export default function SignupPage() {
                 <Input
                   type="email"
                   name="email"
-                  placeholder="you@example.com"
                   value={formData.email}
                   onChange={handleChange}
                   className="mt-2 bg-white/5 border-white/20"
@@ -149,11 +157,34 @@ export default function SignupPage() {
               </div>
 
               <div>
+                <label className="text-sm font-medium">Job Preference</label>
+                <Select
+                  value={formData.jobPreference}
+                  onValueChange={(value) =>
+                    setFormData((prev) => ({
+                      ...prev,
+                      jobPreference: value,
+                    }))
+                  }
+                >
+                  <SelectTrigger className="mt-2 bg-white/5 border-white/20">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {JOB_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
                 <label className="text-sm font-medium">Password</label>
                 <Input
                   type="password"
                   name="password"
-                  placeholder="••••••••"
                   value={formData.password}
                   onChange={handleChange}
                   className="mt-2 bg-white/5 border-white/20"
@@ -166,7 +197,6 @@ export default function SignupPage() {
                 <Input
                   type="password"
                   name="confirmPassword"
-                  placeholder="••••••••"
                   value={formData.confirmPassword}
                   onChange={handleChange}
                   className="mt-2 bg-white/5 border-white/20"

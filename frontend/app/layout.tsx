@@ -5,6 +5,7 @@ import { Analytics } from "@vercel/analytics/next"
 import { Toaster } from "sonner"
 import { ThemeProvider } from "@/components/theme-provider"
 import { DoubtChatbot } from "@/components/doubt-chatbot"
+import { AuthHydrator } from "@/components/auth-hydrator"
 import "./globals.css"
 
 const _geist = Geist({ subsets: ["latin"] })
@@ -30,6 +31,7 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
+          <AuthHydrator />
           {children}
           <Toaster position="bottom-right" />
           <Analytics />
