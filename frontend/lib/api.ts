@@ -401,6 +401,16 @@ export interface AnswerResponse {
     has_structured_approach: boolean
     feedback: string
     follow_up_questions: string[]
+    matched_concepts?: string[]
+    missing_concepts?: string[]
+    coverage_ratio?: number
+    is_correct?: boolean
+    reference_answer?: string | null
+    expected_complexity?: {
+      time?: string
+      space?: string
+      [key: string]: string | undefined
+    } | null
   }
   question_number: number
   total_questions_asked: number
@@ -440,6 +450,7 @@ export interface InterviewReport {
   // Detailed Analysis
   total_questions: number
   questions_answered: number
+  correct_answers?: number
   average_response_time: number
   
   // Speech Analytics
@@ -459,6 +470,8 @@ export interface InterviewReport {
     difficulty: string
     score: number
     feedback: string
+    is_correct?: boolean
+    missing_concepts?: string[]
   }>
   
   // Recommendations

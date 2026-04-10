@@ -26,6 +26,7 @@ import Link from "next/link"
 import {
   profileAPI,
   type CombinedProfile,
+  type LeetCodeProfile,
   resumeAPI,
   certificateAPI,
   learningAPI,
@@ -38,6 +39,7 @@ import { Label } from "@/components/ui/label"
 import { normalizeGithubUsername } from "@/lib/utils"
 
 type DashboardOverview = Awaited<ReturnType<typeof learningAPI.getDashboardOverview>>
+const LEETCODE_TOTAL_PROBLEMS = 3500
 
 const formatApiError = (err: any): string => {
   if (!err) return "Something went wrong"
@@ -57,6 +59,7 @@ export default function Dashboard() {
   
   // State for profile data
   const [profileData, setProfileData] = useState<CombinedProfile | null>(null)
+  const [liveLeetcodeProfile, setLiveLeetcodeProfile] = useState<LeetCodeProfile | null>(null)
   const [loading, setLoading] = useState(false)
   const [profileError, setProfileError] = useState<string | null>(null)
   
@@ -114,34 +117,52 @@ export default function Dashboard() {
 
   const totalTrackedDays = progressHistory.length
 
-  const { learningProgressPercent, interviewReadinessPercent } = useMemo(() => {
+  const learningProgressFromActivityPercent = useMemo(() => {
     if (!progressStats || progressHistory.length === 0) {
-      return { learningProgressPercent: 0, interviewReadinessPercent: 0 }
+      return 0
     }
 
     let maxProblemsPerDay = 0
-    let maxInterviewsPerDay = 0
     progressHistory.forEach((record) => {
       maxProblemsPerDay = Math.max(maxProblemsPerDay, record.problems_solved)
-      maxInterviewsPerDay = Math.max(maxInterviewsPerDay, record.interviews_completed)
     })
 
     const problemCapPerDay = Math.max(1, maxProblemsPerDay)
-    const interviewCapPerDay = Math.max(1, maxInterviewsPerDay)
     const problemDenominator = problemCapPerDay * progressHistory.length
+
+    return Math.min(
+      100,
+      Math.max(0, Math.round((progressStats.total_problems_solved / Math.max(1, problemDenominator)) * 100))
+    )
+  }, [progressStats, progressHistory])
+
+  const interviewReadinessPercent = useMemo(() => {
+    if (!progressStats || progressHistory.length === 0) {
+      return 0
+    }
+
+    let maxInterviewsPerDay = 0
+    progressHistory.forEach((record) => {
+      maxInterviewsPerDay = Math.max(maxInterviewsPerDay, record.interviews_completed)
+    })
+
+    const interviewCapPerDay = Math.max(1, maxInterviewsPerDay)
     const interviewDenominator = interviewCapPerDay * progressHistory.length
 
-    return {
-      learningProgressPercent: Math.min(
-        100,
-        Math.max(0, Math.round((progressStats.total_problems_solved / Math.max(1, problemDenominator)) * 100))
-      ),
-      interviewReadinessPercent: Math.min(
-        100,
-        Math.max(0, Math.round((progressStats.total_interviews / Math.max(1, interviewDenominator)) * 100))
-      ),
-    }
+    return Math.min(
+      100,
+      Math.max(0, Math.round((progressStats.total_interviews / Math.max(1, interviewDenominator)) * 100))
+    )
   }, [progressStats, progressHistory])
+
+  const effectiveLeetcodeProfile = liveLeetcodeProfile ?? profileData?.leetcode
+  const hasLiveLeetcodeProgress = typeof effectiveLeetcodeProfile?.total_solved === "number"
+  const learningProgressPercent = hasLiveLeetcodeProgress
+    ? Math.min(
+        100,
+        Math.max(0, Math.round(((effectiveLeetcodeProfile?.total_solved ?? 0) / LEETCODE_TOTAL_PROBLEMS) * 100))
+      )
+    : learningProgressFromActivityPercent
 
   const quizAccuracyPercent = progressStats ? Math.min(100, Math.max(0, Math.round(progressStats.avg_test_score))) : 0
   const hasActivityData = activityChartData.length > 0
@@ -205,6 +226,7 @@ export default function Dashboard() {
     try {
       const data = await profileAPI.getCombinedProfile(normalizedLeetcode, normalizedGithub)
       setProfileData(data)
+      setLiveLeetcodeProfile(data.leetcode)
       setLeetcodeUsername(normalizedLeetcode)
       setGithubUsername(normalizedGithub)
       setShowProfileInput(false)
@@ -229,12 +251,42 @@ export default function Dashboard() {
       setGithubUsername(savedGithub)
       // Auto-fetch profile if usernames are saved
       profileAPI.getCombinedProfile(savedLeetcode, savedGithub)
-        .then(setProfileData)
+        .then((profile) => {
+          setProfileData(profile)
+          setLiveLeetcodeProfile(profile.leetcode)
+        })
         .catch(() => setShowProfileInput(true))
     } else {
       setShowProfileInput(true)
     }
   }, [])
+
+  useEffect(() => {
+    if (!user) return
+
+    const username = (leetcodeUsername || profileData?.leetcode?.username || "").trim()
+    if (!username) return
+
+    let isMounted = true
+
+    const refreshLeetcode = async () => {
+      try {
+        const latestProfile = await profileAPI.getLeetCodeProfile(username)
+        if (!isMounted) return
+        setLiveLeetcodeProfile(latestProfile)
+      } catch {
+        // Keep last successful snapshot to avoid flickering on transient API issues.
+      }
+    }
+
+    void refreshLeetcode()
+    const intervalId = window.setInterval(refreshLeetcode, 60_000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
+  }, [user, leetcodeUsername, profileData?.leetcode?.username])
 
   const handleResumeUpload = async () => {
     if (!resumeFile) {
@@ -355,7 +407,7 @@ export default function Dashboard() {
                 </Card>
               </Link>
 
-              <Link href="/quiz">
+              <Link href="/tests">
                 <Card className="glass p-6 hover:bg-white/10 transition-all cursor-pointer h-full">
                   <div className="flex items-center gap-3">
                     <Target className="w-8 h-8 text-yellow-500" />
@@ -720,9 +772,11 @@ export default function Dashboard() {
                     title="Learning Progress"
                     value={learningProgressPercent}
                     subtitle={
-                      totalTrackedDays
-                        ? `${progressStats.total_problems_solved} problems solved in ${totalTrackedDays} days`
-                        : `${progressStats.total_problems_solved} problems solved`
+                      hasLiveLeetcodeProgress
+                        ? `Live LeetCode (${effectiveLeetcodeProfile?.username}): ${effectiveLeetcodeProfile?.total_solved ?? 0} solved`
+                        : totalTrackedDays
+                          ? `${progressStats.total_problems_solved} problems solved in ${totalTrackedDays} days`
+                          : `${progressStats.total_problems_solved} problems solved`
                     }
                     icon={<BookOpen className="w-6 h-6" />}
                   />

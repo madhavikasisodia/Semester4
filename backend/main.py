@@ -9,10 +9,11 @@ from functools import lru_cache
 from itertools import count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from uuid import uuid4
 import json
 import asyncio
+import xml.etree.ElementTree as ET
 
 import httpx
 from bs4 import BeautifulSoup
@@ -70,6 +71,26 @@ SCRAPE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+QUIZ_SCRAPE_SOURCES: List[Dict[str, str]] = [
+    {
+        "name": "Google Interview Warmup",
+        "domain": "grow.google",
+        "seed_url": "https://grow.google/certificates/interview-warmup/",
+    },
+    {
+        "name": "Exponent",
+        "domain": "tryexponent.com",
+        "seed_url": "https://www.tryexponent.com/questions",
+    },
+    {
+        "name": "Tech Interview Handbook",
+        "domain": "techinterviewhandbook.org",
+        "seed_url": "https://www.techinterviewhandbook.org/",
+    },
+]
+QUIZ_SEARCH_RESULTS_PER_SOURCE = 5
+QUIZ_SCRAPE_DOC_LIMIT = 10
 
 CODECHEF_PROFILE_URL = "https://www.codechef.com/users/{username}"
 CODECHEF_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
@@ -240,6 +261,29 @@ class AgentRunRequest(BaseModel):
     inputs: Dict[str, Any] = Field(default_factory=dict, description="Optional input payload for the agent")
 
 
+class QuizGenerateRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=100)
+    topic: Optional[str] = Field(None, max_length=100)
+    difficulty: str = Field("medium")
+    num_questions: int = Field(10, ge=1, le=20)
+    quiz_type: str = Field("mixed")
+
+
+class QuizAttemptStartRequest(BaseModel):
+    quiz_id: int
+
+
+class QuizSubmissionAnswer(BaseModel):
+    question_id: int
+    user_answer: List[str] = Field(default_factory=list)
+    time_taken_seconds: Optional[float] = None
+
+
+class QuizAttemptSubmitRequest(BaseModel):
+    attempt_id: int
+    answers: List[QuizSubmissionAnswer] = Field(default_factory=list)
+
+
 def _parse_origins(raw_origins: Optional[str]) -> List[str]:
     if not raw_origins:
         return [
@@ -249,6 +293,13 @@ def _parse_origins(raw_origins: Optional[str]) -> List[str]:
             "http://127.0.0.1:8000",
         ]
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @lru_cache
@@ -301,23 +352,23 @@ def _extract_bearer_token(authorization: Optional[str]) -> str:
 
 
 async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    # Temporarily return a mock user for testing WebSocket functionality
-    return {"id": "test-user", "email": "test@example.com"}
-    
-    # Original code commented out for now:
-    # token = _extract_bearer_token(authorization)
-    # client = get_supabase_client()
-    # try:
-    #     response = await run_in_threadpool(client.auth.get_user, token)
-    # except Exception as exc:
-    #     logger.warning("Token verification failed", exc_info=True)
-    #     raise HTTPException(status_code=401, detail="Invalid or expired token.") from exc
+    if _env_flag("ENABLE_MOCK_AUTH", default=False):
+        logger.warning("ENABLE_MOCK_AUTH=true: returning mock user for authenticated endpoints")
+        return {"id": "test-user", "email": "test@example.com"}
 
-    # user = getattr(response, "user", None)
-    # if user is None:
-    #     raise HTTPException(status_code=401, detail="Invalid or expired token.")
+    token = _extract_bearer_token(authorization)
+    client = get_supabase_client()
+    try:
+        response = await run_in_threadpool(client.auth.get_user, token)
+    except Exception as exc:
+        logger.warning("Token verification failed", exc_info=True)
+        raise HTTPException(status_code=401, detail="Invalid or expired token.") from exc
 
-    # return {"id": user.id, "email": user.email or ""}
+    user = getattr(response, "user", None)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+    return {"id": user.id, "email": user.email or ""}
 
 
 def _build_user_profile_record(user_id: str, email: str, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -428,6 +479,172 @@ def _strip_html_tags(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _extract_duckduckgo_target(raw_href: str) -> Optional[str]:
+    if not raw_href:
+        return None
+    href = raw_href.strip()
+    if href.startswith("//"):
+        href = "https:" + href
+    if href.startswith("/"):
+        parsed = urlparse(href)
+        query_params = parse_qs(parsed.query)
+        encoded_target = query_params.get("uddg", [None])[0]
+        if encoded_target:
+            return unquote(encoded_target)
+        return None
+    return href
+
+
+def _extract_keywords_from_text(text: str, *, limit: int = 4) -> List[str]:
+    stop_words = {
+        "about", "after", "again", "against", "between", "could", "doing", "during", "first", "from",
+        "have", "into", "just", "more", "most", "other", "over", "same", "some", "such", "than",
+        "that", "their", "there", "these", "they", "this", "those", "through", "under", "very",
+        "what", "when", "where", "which", "while", "with", "your", "interview", "practice", "guide",
+        "question", "questions", "answer", "answers", "google", "exponent", "tech", "handbook",
+    }
+
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9\-]{3,}", text.lower())
+    frequencies: Dict[str, int] = {}
+    for word in words:
+        if word in stop_words:
+            continue
+        frequencies[word] = frequencies.get(word, 0) + 1
+
+    ranked = sorted(frequencies.items(), key=lambda item: item[1], reverse=True)
+    return [word for word, _ in ranked[:limit]]
+
+
+async def _search_source_links(source: Dict[str, str], query: str, limit: int = QUIZ_SEARCH_RESULTS_PER_SOURCE) -> List[Dict[str, str]]:
+    domain = source["domain"]
+    search_query = f"site:{domain} {query}".strip()
+    url = f"https://duckduckgo.com/html/?q={quote_plus(search_query)}"
+    try:
+        async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+            response = await client.get(url, headers=SCRAPE_HEADERS)
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Quiz search failed for %s: %s", domain, exc)
+        seed_url = source.get("seed_url")
+        return [{"title": f"{source['name']} resource", "url": seed_url}] if seed_url else []
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    links: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for anchor in soup.select("a.result__a"):
+        href = anchor.get("href") or ""
+        target = _extract_duckduckgo_target(href)
+        if not target:
+            continue
+        parsed_target = urlparse(target)
+        if domain not in parsed_target.netloc:
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        links.append({"title": anchor.get_text(" ", strip=True), "url": target})
+        if len(links) >= limit:
+            break
+
+    if not links and source.get("seed_url"):
+        links.append({"title": f"{source['name']} resource", "url": source["seed_url"]})
+    return links
+
+
+async def _scrape_quiz_resource(link: Dict[str, str], source_name: str, user_query: str) -> Optional[Dict[str, Any]]:
+    url = link.get("url")
+    if not url:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT, follow_redirects=True) as client:
+            response = await client.get(url, headers=SCRAPE_HEADERS)
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Quiz scrape failed for %s: %s", url, exc)
+        return None
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    for tag_name in ("script", "style", "noscript"):
+        for element in soup.find_all(tag_name):
+            element.decompose()
+
+    title = (soup.title.string or "").strip() if soup.title and soup.title.string else ""
+    if not title:
+        title = link.get("title") or source_name
+
+    paragraph_texts: List[str] = []
+    for paragraph in soup.find_all("p")[:25]:
+        text = paragraph.get_text(" ", strip=True)
+        if len(text) >= 60:
+            paragraph_texts.append(text)
+    combined_text = " ".join(paragraph_texts)
+
+    if not combined_text:
+        headers = [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3"])[:8]]
+        combined_text = " ".join(item for item in headers if item)
+
+    if not combined_text:
+        return None
+
+    summary = combined_text[:450].strip()
+    keywords = _extract_keywords_from_text(f"{title} {summary} {user_query}", limit=4)
+    if not keywords:
+        keywords = [item for item in re.findall(r"[a-zA-Z]{4,}", user_query.lower())[:3]] or ["interview", "problem-solving"]
+
+    return {
+        "id": f"scrape-{uuid4().hex[:10]}",
+        "title": title,
+        "description": summary,
+        "source": source_name,
+        "difficulty": "medium",
+        "tags": [keyword.replace("-", " ") for keyword in keywords],
+        "url": url,
+    }
+
+
+async def _scrape_quiz_candidates_from_interview_sites(user_query: str, limit: int = QUIZ_SCRAPE_DOC_LIMIT) -> List[Dict[str, Any]]:
+    query = (user_query or "").strip()
+    if not query:
+        return []
+
+    search_tasks = [
+        asyncio.create_task(_search_source_links(source, query, QUIZ_SEARCH_RESULTS_PER_SOURCE))
+        for source in QUIZ_SCRAPE_SOURCES
+    ]
+    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+    scrape_tasks: List[asyncio.Task] = []
+    for source, result in zip(QUIZ_SCRAPE_SOURCES, search_results):
+        if isinstance(result, Exception):
+            logger.warning("Quiz source search task failed for %s: %s", source["name"], result)
+            continue
+        for link in result[:QUIZ_SEARCH_RESULTS_PER_SOURCE]:
+            scrape_tasks.append(asyncio.create_task(_scrape_quiz_resource(link, source["name"], query)))
+
+    if not scrape_tasks:
+        return []
+
+    scraped = await asyncio.gather(*scrape_tasks, return_exceptions=True)
+    candidates: List[Dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for item in scraped:
+        if isinstance(item, Exception):
+            logger.warning("Quiz scrape task failed: %s", item)
+            continue
+        if not item:
+            continue
+        title_key = _normalize_quiz_text(item.get("title"))
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        candidates.append(item)
+        if len(candidates) >= limit:
+            break
+
+    return candidates
+
+
 def _resolve_topic_config(topic: str) -> Dict[str, Any]:
     key = _normalize_topic_key(topic)
     base = TOPIC_SCRAPE_CONFIG.get(key)
@@ -447,17 +664,35 @@ def _resolve_topic_config(topic: str) -> Dict[str, Any]:
 async def _scrape_devto_articles(tags: List[str], limit: int = 12) -> List[Dict[str, Any]]:
     if not tags:
         return []
-    tag = random.choice(tags)
-    params = {"tag": tag, "per_page": min(20, max(limit, 10))}
-    try:
-        async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
-            response = await client.get("https://dev.to/api/articles", params=params, headers=SCRAPE_HEADERS)
-            response.raise_for_status()
-    except Exception as exc:  # broad to keep scraping resilient
-        logger.warning("DEV.to scrape failed for tag %s: %s", tag, exc)
+    normalized_tags = [tag.strip() for tag in tags if tag and tag.strip()]
+    if not normalized_tags:
         return []
 
-    articles = response.json()
+    per_tag_limit = min(15, max(limit, 8))
+    articles: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
+        for tag in normalized_tags:
+            params = {"tag": tag, "per_page": per_tag_limit}
+            try:
+                response = await client.get("https://dev.to/api/articles", params=params, headers=SCRAPE_HEADERS)
+                response.raise_for_status()
+                payload = response.json() or []
+            except Exception as exc:  # broad to keep scraping resilient
+                logger.warning("DEV.to scrape failed for tag %s: %s", tag, exc)
+                continue
+
+            for article in payload:
+                url = (article.get("url") or article.get("canonical_url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                articles.append(article)
+                if len(articles) >= max(limit * 2, 20):
+                    break
+            if len(articles) >= max(limit * 2, 20):
+                break
+
     items: List[Dict[str, Any]] = []
     for article in articles:
         url = article.get("url") or article.get("canonical_url")
@@ -473,38 +708,48 @@ async def _scrape_devto_articles(tags: List[str], limit: int = 12) -> List[Dict[
                 "summary": (article.get("description") or "").strip() or None,
             }
         )
-    return items
+        if len(items) >= limit:
+            break
+    return items[:limit]
 
 
 async def _scrape_gfg_posts(query: str, limit: int = 15) -> List[Dict[str, Any]]:
     if not query:
         return []
-    params = {"search": query, "per_page": min(25, max(limit, 12))}
+    params = {
+        "order": "desc",
+        "sort": "relevance",
+        "q": query,
+        "site": "stackoverflow",
+        "pagesize": min(25, max(limit, 10)),
+    }
     try:
         async with httpx.AsyncClient(timeout=SCRAPE_TIMEOUT) as client:
-            response = await client.get("https://www.geeksforgeeks.org/wp-json/wp/v2/posts", params=params, headers=SCRAPE_HEADERS)
+            response = await client.get("https://api.stackexchange.com/2.3/search/advanced", params=params, headers=SCRAPE_HEADERS)
             response.raise_for_status()
     except Exception as exc:
-        logger.warning("GeeksforGeeks scrape failed for query '%s': %s", query, exc)
+        logger.warning("Stack Overflow scrape failed for query '%s': %s", query, exc)
         return []
 
-    posts = response.json()
+    posts = response.json().get("items", [])
     items: List[Dict[str, Any]] = []
     for post in posts:
-        link = post.get("link")
-        raw_title = post.get("title", {}).get("rendered")
+        link = (post.get("link") or "").strip()
+        raw_title = post.get("title")
         if not link or not raw_title:
             continue
         items.append(
             {
                 "title": _strip_html_tags(raw_title),
-                "url": link.strip(),
-                "source": "GeeksforGeeks",
+                "url": link,
+                "source": "Stack Overflow",
                 "content_type": "practice",
-                "summary": _strip_html_tags(post.get("excerpt", {}).get("rendered")),
+                "summary": None,
             }
         )
-    return items
+        if len(items) >= limit:
+            break
+    return items[:limit]
 
 
 async def _scrape_hn_articles(query: str, limit: int = 12) -> List[Dict[str, Any]]:
@@ -519,21 +764,26 @@ async def _scrape_hn_articles(query: str, limit: int = 12) -> List[Dict[str, Any
         logger.warning("HNRSS scrape failed for query '%s': %s", query, exc)
         return []
 
-    soup = BeautifulSoup(response.text, "xml")
+    try:
+        root = ET.fromstring(response.text)
+    except ET.ParseError as exc:
+        logger.warning("HNRSS parse failed for query '%s': %s", query, exc)
+        return []
+
     items: List[Dict[str, Any]] = []
-    for entry in soup.find_all("item", limit=limit):
-        title_tag = entry.find("title")
-        link_tag = entry.find("link")
-        if not title_tag or not link_tag:
+    for entry in root.findall("./channel/item")[:limit]:
+        title = (entry.findtext("title") or "").strip()
+        link = (entry.findtext("link") or "").strip()
+        if not title or not link:
             continue
-        description_tag = entry.find("description")
+        description = (entry.findtext("description") or "").strip() or None
         items.append(
             {
-                "title": title_tag.text.strip(),
-                "url": link_tag.text.strip(),
+                "title": title,
+                "url": link,
                 "source": "Hacker News",
                 "content_type": "article",
-                "summary": description_tag.text.strip() if description_tag and description_tag.text else None,
+                "summary": description,
             }
         )
     return items
@@ -828,6 +1078,182 @@ QUESTION_BANK: Dict[str, List[Dict[str, Any]]] = {
             "companies": ["Amazon"],
         },
     ],
+}
+
+
+ANSWER_KEYS: Dict[str, Dict[str, Any]] = {
+    "algo-1": {
+        "concepts": [
+            {"label": "Hash map to store complements", "keywords": ["hash map", "hashmap", "dictionary", "map"]},
+            {"label": "Single pass iteration", "keywords": ["single pass", "one pass", "linear time", "o(n)"]},
+            {"label": "Return indices instead of values", "keywords": ["index", "indices", "position"]},
+            {"label": "Avoid reusing the same index twice", "keywords": ["duplicate", "reuse", "same index"]},
+        ],
+        "sample_answer": (
+            "Scan the array once while storing each value's index in a hash map. "
+            "For every number check whether target - num already exists in the map; if it does, "
+            "return the stored index and the current index. This yields O(n) time and O(n) space and "
+            "never reuses the same element twice."
+        ),
+        "complexity": {"time": "O(n)", "space": "O(n)"},
+        "follow_ups": [
+            "How would you solve Two Sum when the input is a stream?",
+            "Can you do it if the array is already sorted?",
+        ],
+        "passing_threshold": 0.7,
+    },
+    "algo-2": {
+        "concepts": [
+            {"label": "Hash map from key to node", "keywords": ["hash map", "hashmap", "dictionary"]},
+            {"label": "Doubly linked list for recency order", "keywords": ["doubly", "linked list", "dll"]},
+            {"label": "O(1) get and put by moving nodes", "keywords": ["o(1)", "constant", "move to head"]},
+            {"label": "Evict least recently used entry", "keywords": ["evict", "tail", "least recently"]},
+        ],
+        "sample_answer": (
+            "Maintain a hash map that points to nodes inside a custom doubly linked list ordered by recency. "
+            "Every get moves the node to the front; every put inserts a new node at the front and trims the tail when "
+            "capacity is exceeded. Both structures keep operations O(1)."
+        ),
+        "complexity": {"time": "O(1) per op", "space": "O(capacity)"},
+        "follow_ups": [
+            "What changes if the cache must be thread-safe?",
+            "How would you persist hot entries to disk?",
+        ],
+        "passing_threshold": 0.75,
+    },
+    "algo-3": {
+        "concepts": [
+            {"label": "Frequency map of numbers", "keywords": ["frequency", "count", "hash map", "dictionary"]},
+            {"label": "Use heap or bucket sort to extract top k", "keywords": ["heap", "bucket", "priority queue"]},
+            {"label": "Discuss complexity vs n and k", "keywords": ["o(n log k)", "o(n)", "linear"]},
+        ],
+        "sample_answer": (
+            "Count how often every number appears using a hash map, then push the entries into a min-heap of size k "
+            "(or buckets indexed by frequency) so we always keep the k most frequent values. That runs in O(n log k) time."
+        ),
+        "complexity": {"time": "O(n log k) or O(n)", "space": "O(n)"},
+        "follow_ups": [
+            "When would you prefer buckets over a heap?",
+            "Can you solve it when k is close to n?",
+        ],
+        "passing_threshold": 0.66,
+    },
+    "algo-4": {
+        "concepts": [
+            {"label": "Mark null children while serializing", "keywords": ["null", "#", "None marker", "sentinel"]},
+            {"label": "Deterministic traversal order", "keywords": ["preorder", "breadth", "dfs"]},
+            {"label": "Symmetric deserialize routine", "keywords": ["pointer", "iterator", "rebuild"]},
+            {"label": "Complexity discussion", "keywords": ["o(n)", "linear time", "linear space"]},
+        ],
+        "sample_answer": (
+            "Use preorder traversal and append either the node value or a # sentinel for null children. "
+            "During deserialize consume tokens from an iterator: whenever you see a sentinel return None; otherwise build a node "
+            "recursively. Both directions touch each node once so the solution is O(n)."
+        ),
+        "complexity": {"time": "O(n)", "space": "O(n)"},
+        "follow_ups": [
+            "How would you handle very deep trees?",
+            "Could you encode it iteratively?",
+        ],
+        "passing_threshold": 0.7,
+    },
+    "sd-1": {
+        "concepts": [
+            {"label": "Base62 short code generation", "keywords": ["base62", "base 62", "hashids", "short code"]},
+            {"label": "Key-value store for mappings", "keywords": ["key-value", "redis", "dynamodb", "datastore"]},
+            {"label": "Expiration or TTL handling", "keywords": ["ttl", "expiry", "expiration"]},
+            {"label": "Analytics or rate limiting", "keywords": ["analytics", "metrics", "rate limit"]},
+        ],
+        "sample_answer": (
+            "Accept a long URL, generate a collision-resistant base62 slug, and store the mapping in a replicated key-value store. "
+            "Reads hit a CDN-friendly redirect service, while async workers record analytics and enforce TTL or custom domains."
+        ),
+        "follow_ups": [
+            "How would you prevent hot-key issues?",
+            "Explain how custom domains would work.",
+        ],
+        "passing_threshold": 0.6,
+    },
+    "sd-2": {
+        "concepts": [
+            {"label": "WebSocket or long-lived transport", "keywords": ["websocket", "socket", "long polling"]},
+            {"label": "Fan-out tier with queue", "keywords": ["pubsub", "kafka", "queue", "fan-out"]},
+            {"label": "Persistence for chat history", "keywords": ["database", "s3", "cold storage", "history"]},
+            {"label": "Presence and typing indicators", "keywords": ["presence", "typing", "online state"]},
+        ],
+        "sample_answer": (
+            "Clients connect through a gateway that terminates WebSockets. Messages go through a pub/sub bus so we can fan-out "
+            "to all participants, while a write path persists them to storage. A cache keeps recent conversations, and a presence "
+            "service tracks online users and typing indicators."
+        ),
+        "follow_ups": [
+            "Where do you enforce ordering?",
+            "How do you handle back-pressure when a client is slow?",
+        ],
+        "passing_threshold": 0.65,
+    },
+    "sd-3": {
+        "concepts": [
+            {"label": "Fan-out on write vs read", "keywords": ["fan-out", "write", "read"]},
+            {"label": "Ranking signal pipeline", "keywords": ["ranking", "ml", "scoring", "signals"]},
+            {"label": "Caching hot feeds", "keywords": ["cache", "redis", "memcache"]},
+            {"label": "Batching background jobs", "keywords": ["worker", "async", "batch"]},
+        ],
+        "sample_answer": (
+            "Writers push activities into a log, a fan-out service materializes personalized feeds for high-QPS users, "
+            "and low-traffic users read on demand. A ranking pipeline blends social graph data with freshness signals and the "
+            "top stories are cached per user."
+        ),
+        "follow_ups": [
+            "How would you support topic-based feeds?",
+            "Discuss eventual consistency issues.",
+        ],
+        "passing_threshold": 0.6,
+    },
+    "beh-1": {
+        "concepts": [
+            {"label": "Uses STAR structure", "keywords": ["situation", "task", "action", "result", "star"]},
+            {"label": "Explains the disagreement", "keywords": ["disagree", "conflict", "misaligned"]},
+            {"label": "Shares resolution and impact", "keywords": ["aligned", "compromise", "resolved", "impact"]},
+        ],
+        "sample_answer": (
+            "Situation: a teammate and I disagreed on rolling back a release. Task: keep production stable without derailing "
+            "the roadmap. Action: I gathered error data, created a quick spike to prove the fix, and facilitated a review. Result: "
+            "we shipped the safer change within a day and both of us documented a playbook."
+        ),
+        "follow_ups": [
+            "What would you repeat or avoid next time?",
+            "How did the relationship evolve afterward?",
+        ],
+        "passing_threshold": 0.6,
+    },
+    "beh-2": {
+        "concepts": [
+            {"label": "Describes leadership without authority", "keywords": ["influence", "led", "without authority"]},
+            {"label": "Mentions measurable outcome", "keywords": ["metric", "result", "impact", "kpi"]},
+            {"label": "Reflects on lessons learned", "keywords": ["learned", "lesson", "retrospective"]},
+        ],
+        "sample_answer": (
+            "I noticed our deploy pipeline failed 20% of the time, so I volunteered to coordinate a fix even though I was an IC. "
+            "I aligned QA and DevOps on a shared goal, built a lightweight RFC, and tracked progress in public. Deployment failures "
+            "dropped to 2% and the team later asked me to lead similar efforts."
+        ),
+        "follow_ups": [
+            "How did you balance this with your core work?",
+            "What feedback did you get from the team?",
+        ],
+        "passing_threshold": 0.6,
+    },
+}
+
+
+INTERVIEW_TYPE_TOPIC_MAP: Dict[str, List[str]] = {
+    "technical": ["algorithms", "system-design"],
+    "coding": ["algorithms"],
+    "system_design": ["system-design"],
+    "system-design": ["system-design"],
+    "behavioral": ["behavioral"],
+    "hr_screening": ["behavioral"],
 }
 
 
@@ -1493,14 +1919,127 @@ USER_ACHIEVEMENTS: Dict[str, List[Dict[str, Any]]] = {}
 USER_RESUMES: Dict[str, List[Dict[str, Any]]] = {}
 USER_CERTIFICATES: Dict[str, List[Dict[str, Any]]] = {}
 USER_TEST_SCORES: Dict[str, List[Dict[str, Any]]] = {}
+USER_QUIZZES: Dict[str, List[Dict[str, Any]]] = {}
+QUIZ_QUESTIONS: Dict[int, List[Dict[str, Any]]] = {}
+QUIZ_ATTEMPTS: Dict[int, Dict[str, Any]] = {}
+QUIZ_ID_COUNTER = count(1)
+QUIZ_QUESTION_ID_COUNTER = count(1)
+QUIZ_ATTEMPT_ID_COUNTER = count(1)
 FILLER_WORDS = {"um", "uh", "like", "you know", "so"}
 
 
 def _flatten_questions() -> List[Dict[str, Any]]:
+
     items: List[Dict[str, Any]] = []
     for questions in QUESTION_BANK.values():
         items.extend(questions)
     return items
+
+
+def _normalize_quiz_text(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _filter_quiz_candidates(subject: str, topic: Optional[str], difficulty: str) -> List[Dict[str, Any]]:
+    all_questions = _flatten_questions()
+    requested_difficulty = _normalize_quiz_text(difficulty)
+    subject_key = _normalize_quiz_text(subject)
+    topic_key = _normalize_quiz_text(topic)
+
+    filtered = all_questions
+    if requested_difficulty in {"easy", "medium", "hard"}:
+        filtered = [q for q in filtered if _normalize_quiz_text(q.get("difficulty")) == requested_difficulty]
+
+    if subject_key or topic_key:
+        token = f"{subject_key} {topic_key}".strip()
+        token_parts = [piece for piece in token.split() if piece]
+
+        def _matches(question: Dict[str, Any]) -> bool:
+            searchable = " ".join(
+                [
+                    _normalize_quiz_text(question.get("title")),
+                    _normalize_quiz_text(question.get("description")),
+                    _normalize_quiz_text(question.get("source")),
+                    " ".join(_normalize_quiz_text(tag) for tag in question.get("tags", []) or []),
+                    " ".join(_normalize_quiz_text(company) for company in question.get("companies", []) or []),
+                ]
+            )
+            if subject_key and subject_key in searchable:
+                return True
+            if topic_key and topic_key in searchable:
+                return True
+            return any(part in searchable for part in token_parts)
+
+        matched = [q for q in filtered if _matches(q)]
+        if matched:
+            return matched
+
+    if filtered:
+        return filtered
+    return all_questions
+
+
+def _build_mcq_from_question(raw_question: Dict[str, Any], quiz_id: int, question_order: int) -> Dict[str, Any]:
+    tags = [str(tag).strip() for tag in raw_question.get("tags", []) if str(tag).strip()]
+    source = str(raw_question.get("source") or "general").strip().title()
+    title = str(raw_question.get("title") or "Interview Question").strip()
+
+    if tags:
+        correct_answer = tags[0].title()
+        distractors = [
+            tags[1].title() if len(tags) > 1 else "Time complexity",
+            source,
+            "Edge cases",
+        ]
+        prompt = f"Which concept is most central to this topic: {title}?"
+    else:
+        correct_answer = str(raw_question.get("difficulty") or "medium").title()
+        distractors = ["Easy", "Medium", "Hard"]
+        prompt = f"What is the difficulty level for this problem: {title}?"
+
+    options = [correct_answer] + [item for item in distractors if item != correct_answer]
+    deduped: List[str] = []
+    for option in options:
+        if option not in deduped:
+            deduped.append(option)
+    random.shuffle(deduped)
+
+    return {
+        "id": next(QUIZ_QUESTION_ID_COUNTER),
+        "quiz_id": quiz_id,
+        "question_text": prompt,
+        "question_type": "mcq",
+        "options": deduped,
+        "points": 1,
+        "topic_tags": tags,
+        "question_order": question_order,
+        "_correct_answer": correct_answer,
+    }
+
+
+def _get_user_quiz_or_404(user_id: str, quiz_id: int) -> Dict[str, Any]:
+    quizzes = USER_QUIZZES.get(user_id, [])
+    for quiz in quizzes:
+        if quiz["id"] == quiz_id:
+            return quiz
+    raise HTTPException(status_code=404, detail="Quiz not found")
+
+
+def _sanitize_quiz_questions(quiz_id: int) -> List[Dict[str, Any]]:
+    questions = QUIZ_QUESTIONS.get(quiz_id, [])
+    return [
+        {
+            "id": question["id"],
+            "quiz_id": question["quiz_id"],
+            "question_text": question["question_text"],
+            "question_type": question["question_type"],
+            "options": question.get("options"),
+            "points": question.get("points", 1),
+            "topic_tags": question.get("topic_tags"),
+            "question_order": question.get("question_order", 1),
+        }
+        for question in questions
+    ]
 
 
 def _match_company_key(name: str) -> Optional[str]:
@@ -1541,10 +2080,30 @@ def _calculate_progress_stats() -> Dict[str, Any]:
     }
 
 
-def _select_questions(difficulty: Optional[str], count_questions: int) -> List[Dict[str, Any]]:
-    pool = [q for q in _flatten_questions() if not difficulty or q["difficulty"].lower() == difficulty.lower()]
+def _select_questions(
+    interview_type: Optional[str],
+    difficulty: Optional[str],
+    count_questions: int,
+) -> List[Dict[str, Any]]:
+    normalized_type = (interview_type or "").lower()
+    topic_keys = INTERVIEW_TYPE_TOPIC_MAP.get(normalized_type)
+    if not topic_keys:
+        topic_keys = list(QUESTION_BANK.keys())
+
+    pool: List[Dict[str, Any]] = []
+    for topic in topic_keys:
+        pool.extend(QUESTION_BANK.get(topic, []))
+
+    if not pool:
+        pool = _flatten_questions()
+
+    if difficulty:
+        filtered = [q for q in pool if q["difficulty"].lower() == difficulty.lower()]
+        pool = filtered or pool
+
     if len(pool) < count_questions:
         pool = _flatten_questions()
+
     rng = random.Random()
     return rng.sample(pool, k=min(count_questions, len(pool)))
 
@@ -1552,16 +2111,73 @@ def _select_questions(difficulty: Optional[str], count_questions: int) -> List[D
 def _evaluate_answer(question: Dict[str, Any], answer: str) -> Dict[str, Any]:
     tokens = answer.split()
     word_count = len(tokens)
-    completeness = min(100, max(40, word_count))
-    technical_accuracy = min(100, 60 + word_count // 2)
-    clarity = min(100, 55 + word_count // 3)
-    has_examples = any(keyword in answer.lower() for keyword in ["for example", "for instance", "e.g."])
-    structured = any(keyword in answer.lower() for keyword in ["first", "second", "finally", "approach"])
-    feedback = "Solid structure, expand on trade-offs." if structured else "Add more structure and concrete examples."
-    follow_ups = [
+    answer_lower = answer.lower()
+    has_examples = any(keyword in answer_lower for keyword in ["for example", "for instance", "e.g."])
+    structured = any(keyword in answer_lower for keyword in ["first", "second", "finally", "approach", "star"])
+    default_follow_ups = [
         f"How would you handle edge cases for {question['title'].lower()}?",
         "What optimizations could improve your solution?",
     ]
+
+    answer_key = ANSWER_KEYS.get(question.get("id"))
+    if answer_key:
+        concepts = answer_key.get("concepts", [])
+        matched: List[str] = []
+        missing: List[str] = []
+        for concept in concepts:
+            keywords = [kw.lower() for kw in concept.get("keywords", [])]
+            if keywords and any(keyword in answer_lower for keyword in keywords):
+                matched.append(concept["label"])
+            else:
+                missing.append(concept["label"])
+
+        total = len(concepts)
+        coverage_ratio = len(matched) / total if total else 0.0
+        threshold = answer_key.get("passing_threshold", 0.6)
+        is_correct = coverage_ratio >= threshold
+
+        technical_accuracy = int(55 + coverage_ratio * 45)
+        completeness = int(50 + coverage_ratio * 50)
+        clarity = min(100, 60 + word_count // 2)
+
+        feedback_parts = []
+        if is_correct:
+            feedback_parts.append("Great job covering the critical elements.")
+        if missing:
+            feedback_parts.append(f"Add detail on: {', '.join(missing[:2])}.")
+        if not structured:
+            feedback_parts.append("Consider announcing the structure before diving into details.")
+        if not has_examples and question.get("id", "").startswith("beh"):
+            feedback_parts.append("Ground the story with concrete metrics or impact.")
+        feedback = " ".join(part for part in feedback_parts if part).strip() or "Keep iterating on your story."
+
+        follow_ups = answer_key.get("follow_ups") or default_follow_ups
+
+        return {
+            "question": question["title"],
+            "answer": answer,
+            "technical_accuracy": min(100, technical_accuracy),
+            "completeness": min(100, completeness),
+            "clarity": clarity,
+            "has_real_world_examples": has_examples,
+            "has_structured_approach": structured,
+            "feedback": feedback,
+            "follow_up_questions": follow_ups,
+            "matched_concepts": matched,
+            "missing_concepts": missing,
+            "coverage_ratio": coverage_ratio,
+            "is_correct": is_correct,
+            "reference_answer": answer_key.get("sample_answer"),
+            "expected_complexity": answer_key.get("complexity"),
+        }
+
+    completeness = min(100, max(40, word_count))
+    technical_accuracy = min(100, 60 + word_count // 2)
+    clarity = min(100, 55 + word_count // 3)
+    coverage_ratio = min(1.0, word_count / 120) if word_count else 0.0
+    is_correct = technical_accuracy >= 70
+    feedback = "Solid structure, expand on trade-offs." if structured else "Add more structure and concrete examples."
+
     return {
         "question": question["title"],
         "answer": answer,
@@ -1571,7 +2187,13 @@ def _evaluate_answer(question: Dict[str, Any], answer: str) -> Dict[str, Any]:
         "has_real_world_examples": has_examples,
         "has_structured_approach": structured,
         "feedback": feedback,
-        "follow_up_questions": follow_ups,
+        "follow_up_questions": default_follow_ups,
+        "matched_concepts": [],
+        "missing_concepts": [],
+        "coverage_ratio": coverage_ratio,
+        "is_correct": is_correct,
+        "reference_answer": None,
+        "expected_complexity": None,
     }
 
 
@@ -1598,9 +2220,11 @@ def _build_interview_report(session: Dict[str, Any]) -> Dict[str, Any]:
     answered = len(responses)
     duration = session.get("duration_minutes", 30)
     overall_score = int(sum(r["technical_accuracy"] for r in responses) / max(1, answered))
+    correct_answers = sum(1 for r in responses if r.get("is_correct"))
     confidence_trend = "increasing" if answered > 1 and responses[-1]["clarity"] >= responses[0]["clarity"] else "stable"
-    strengths = ["Clear communication", "Structured approach"] if responses else ["Preparation"]
-    weaknesses = ["Add more real-world examples"]
+    coverage_ratio = correct_answers / max(1, answered)
+    strengths = ["Strong coverage of key concepts"] if coverage_ratio >= 0.6 else ["Clear communication"]
+    weaknesses = ["Mention missing concepts earlier"] if coverage_ratio < 0.6 else ["Add more real-world examples"]
     question_perf = []
     for idx, (question, resp) in enumerate(zip(session.get("questions", []), responses), start=1):
         question_perf.append(
@@ -1610,6 +2234,8 @@ def _build_interview_report(session: Dict[str, Any]) -> Dict[str, Any]:
                 "difficulty": question["difficulty"],
                 "score": resp["technical_accuracy"],
                 "feedback": resp["feedback"],
+                "is_correct": resp.get("is_correct", False),
+                "missing_concepts": resp.get("missing_concepts", []),
             }
         )
     return {
@@ -1626,6 +2252,7 @@ def _build_interview_report(session: Dict[str, Any]) -> Dict[str, Any]:
         "body_language_score": 75,
         "total_questions": total_questions,
         "questions_answered": answered,
+        "correct_answers": correct_answers,
         "average_response_time": round((duration * 60) / max(1, answered), 2),
         "total_filler_words": sum(len(_compute_speech_analysis(resp["answer"], None)["filler_words_found"]) for resp in responses),
         "speech_clarity": int(overall_score * 0.88),
@@ -1645,8 +2272,11 @@ def _build_interview_report(session: Dict[str, Any]) -> Dict[str, Any]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
-        # Temporarily disable Supabase client initialization for WebSocket testing
-        logger.info("Starting application without Supabase client (for WebSocket testing)")
+        if _env_flag("ENABLE_MOCK_AUTH", default=False):
+            logger.warning("Starting with ENABLE_MOCK_AUTH=true. Not recommended for production.")
+        else:
+            get_supabase_client()
+            logger.info("Supabase client initialized during startup")
         yield
     except RuntimeError as exc:
         logger.error("Startup aborted: %s", exc)
@@ -2081,7 +2711,7 @@ async def start_interview(
     if persona is None:
         raise HTTPException(status_code=404, detail="Persona not found")
     session_id = str(uuid4())
-    questions = _select_questions(request.difficulty, count_questions=5)
+    questions = _select_questions(request.interview_type, request.difficulty, count_questions=5)
     if not questions:
         raise HTTPException(status_code=500, detail="No questions available")
     start_time = _current_timestamp()
@@ -2254,6 +2884,198 @@ async def analyze_speech(
         "speech_analysis": analysis,
         "recommendations": recommendations,
         "overall_rating": rating,
+    }
+
+
+# ----------------------- Quiz APIs -----------------------
+
+@app.get("/quiz/list")
+async def list_quizzes(
+    limit: int = Query(50, ge=1, le=100),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    user_id = current_user["id"]
+    quizzes = USER_QUIZZES.get(user_id, [])
+    ordered = sorted(quizzes, key=lambda quiz: quiz.get("created_at", ""), reverse=True)
+    return ordered[:limit]
+
+
+@app.post("/quiz/generate")
+async def generate_quiz(
+    request: QuizGenerateRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    subject = request.subject.strip()
+    if not subject:
+        raise HTTPException(status_code=400, detail="Subject is required")
+
+    search_query = " ".join(part for part in [subject, request.topic or ""] if part).strip()
+    scraped_candidates = await _scrape_quiz_candidates_from_interview_sites(search_query)
+    for candidate in scraped_candidates:
+        candidate["difficulty"] = request.difficulty.lower()
+
+    candidates = scraped_candidates or _filter_quiz_candidates(subject, request.topic, request.difficulty)
+    if not candidates:
+        raise HTTPException(status_code=404, detail="No questions available to generate a quiz")
+
+    selected: List[Dict[str, Any]] = []
+    while len(selected) < request.num_questions:
+        selected.append(random.choice(candidates))
+
+    quiz_id = next(QUIZ_ID_COUNTER)
+    quiz_title = f"{subject.title()} Quiz"
+    quiz_description = (
+        f"AI-generated quiz for {subject}" if not request.topic else f"AI-generated quiz for {subject} ({request.topic})"
+    )
+    created_at = _current_timestamp()
+    quiz_record = {
+        "id": quiz_id,
+        "title": quiz_title,
+        "description": quiz_description,
+        "subject": subject,
+        "difficulty_level": request.difficulty.lower(),
+        "total_questions": request.num_questions,
+        "time_limit_minutes": max(5, request.num_questions * 2),
+        "quiz_type": request.quiz_type,
+        "content_source": "web_scraped" if scraped_candidates else "internal_bank",
+        "created_at": created_at,
+    }
+
+    if user_id not in USER_QUIZZES:
+        USER_QUIZZES[user_id] = []
+    USER_QUIZZES[user_id].append(quiz_record)
+
+    QUIZ_QUESTIONS[quiz_id] = [
+        _build_mcq_from_question(raw_question, quiz_id=quiz_id, question_order=index)
+        for index, raw_question in enumerate(selected, start=1)
+    ]
+
+    return quiz_record
+
+
+@app.get("/quiz/{quiz_id}")
+async def get_quiz(
+    quiz_id: int,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    quiz = _get_user_quiz_or_404(user_id, quiz_id)
+    return {
+        **quiz,
+        "questions": _sanitize_quiz_questions(quiz_id),
+    }
+
+
+@app.post("/quiz/attempt/start")
+async def start_quiz_attempt(
+    request: QuizAttemptStartRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    _get_user_quiz_or_404(user_id, request.quiz_id)
+
+    attempt_id = next(QUIZ_ATTEMPT_ID_COUNTER)
+    started_at = _utcnow()
+    QUIZ_ATTEMPTS[attempt_id] = {
+        "id": attempt_id,
+        "quiz_id": request.quiz_id,
+        "user_id": user_id,
+        "started_at": started_at,
+        "submitted_at": None,
+        "status": "in_progress",
+    }
+
+    return {
+        "id": attempt_id,
+        "quiz_id": request.quiz_id,
+        "status": "in_progress",
+        "started_at": _isoformat(started_at),
+    }
+
+
+@app.post("/quiz/attempt/submit")
+async def submit_quiz_attempt(
+    request: QuizAttemptSubmitRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    attempt = QUIZ_ATTEMPTS.get(request.attempt_id)
+    if not attempt or attempt.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Quiz attempt not found")
+    if attempt.get("status") == "submitted":
+        raise HTTPException(status_code=400, detail="Quiz attempt already submitted")
+
+    quiz = _get_user_quiz_or_404(user_id, int(attempt["quiz_id"]))
+    questions = QUIZ_QUESTIONS.get(int(attempt["quiz_id"]), [])
+    if not questions:
+        raise HTTPException(status_code=400, detail="Quiz has no questions")
+
+    answer_map: Dict[int, List[str]] = {entry.question_id: entry.user_answer for entry in request.answers}
+    total_questions = len(questions)
+    max_score = sum(int(question.get("points", 1)) for question in questions)
+    score = 0
+    attempted = 0
+    correct = 0
+    wrong = 0
+    skipped = 0
+    weak_topics: List[str] = []
+    strong_topics: List[str] = []
+
+    for question in questions:
+        selected_options = answer_map.get(int(question["id"]), [])
+        selected_answer = selected_options[0] if selected_options else None
+        if not selected_answer:
+            skipped += 1
+            continue
+
+        attempted += 1
+        if selected_answer == question.get("_correct_answer"):
+            correct += 1
+            score += int(question.get("points", 1))
+            for tag in question.get("topic_tags", []) or []:
+                if tag not in strong_topics:
+                    strong_topics.append(tag)
+        else:
+            wrong += 1
+            for tag in question.get("topic_tags", []) or []:
+                if tag not in weak_topics:
+                    weak_topics.append(tag)
+
+    percentage = (float(score) / float(max_score) * 100.0) if max_score else 0.0
+    passed = percentage >= 60.0
+    submitted_at = _utcnow()
+    started_at = attempt.get("started_at")
+    duration_minutes = 0.0
+    if isinstance(started_at, datetime):
+        duration_minutes = max((submitted_at - started_at).total_seconds() / 60.0, 0.1)
+
+    attempt["status"] = "submitted"
+    attempt["submitted_at"] = submitted_at
+
+    feedback = (
+        "Great work. Your fundamentals look solid."
+        if passed
+        else "Keep practicing and review the recommended topics before your next attempt."
+    )
+
+    return {
+        "attempt_id": request.attempt_id,
+        "quiz_title": quiz["title"],
+        "total_questions": total_questions,
+        "questions_attempted": attempted,
+        "correct_answers": correct,
+        "wrong_answers": wrong,
+        "skipped_questions": skipped,
+        "total_score": score,
+        "max_score": max_score,
+        "percentage": round(percentage, 2),
+        "passed": passed,
+        "time_taken_minutes": round(duration_minutes, 2),
+        "ai_feedback": feedback,
+        "strengths": strong_topics[:5],
+        "weaknesses": weak_topics[:5],
+        "recommended_topics": weak_topics[:5],
     }
 
 

@@ -3,6 +3,7 @@
 import { Navbar } from "@/components/navbar"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
 import { Brain, TrendingUp, AlertCircle, Send, Award, CheckCircle, Video, Mic, StopCircle } from "lucide-react"
 import { useState, useEffect, useRef } from "react"
 import { interviewAPI, type Persona, type InterviewSession, type InterviewReport } from "@/lib/api"
@@ -355,6 +356,18 @@ export default function InterviewPage() {
     return () => clearTimeout(timer)
   }, [sessionStarted, interviewComplete, currentQuestion?.title, currentQuestion?.text])
 
+  const isAnswerCorrect = currentFeedback?.evaluation?.is_correct ?? false
+  const matchedConcepts = currentFeedback?.evaluation?.matched_concepts ?? []
+  const missingConcepts = currentFeedback?.evaluation?.missing_concepts ?? []
+  const coveragePercent =
+    currentFeedback?.evaluation?.coverage_ratio !== undefined && currentFeedback?.evaluation?.coverage_ratio !== null
+      ? Math.round((currentFeedback.evaluation.coverage_ratio || 0) * 100)
+      : null
+  const expectedComplexity = currentFeedback?.evaluation?.expected_complexity
+  const expectedComplexityLabel = expectedComplexity
+    ? [expectedComplexity.time, expectedComplexity.space].filter(Boolean).join(" • ")
+    : ""
+
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
@@ -484,7 +497,7 @@ export default function InterviewPage() {
             </div>
 
             <Card className="p-8 space-y-6">
-              <div className="grid md:grid-cols-3 gap-6 text-center">
+              <div className="grid md:grid-cols-4 gap-6 text-center">
                 <div className="space-y-2">
                   <p className="text-muted-foreground">Overall Score</p>
                   <p className="text-4xl font-bold text-primary">
@@ -497,6 +510,14 @@ export default function InterviewPage() {
                     {finalReport.questions_answered || finalReport.total_questions}
                   </p>
                 </div>
+                {typeof finalReport.correct_answers === "number" && (
+                  <div className="space-y-2">
+                    <p className="text-muted-foreground">Correct Answers</p>
+                    <p className="text-4xl font-bold text-green-600">
+                      {finalReport.correct_answers}/{finalReport.total_questions}
+                    </p>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <p className="text-muted-foreground">Average Confidence</p>
                   <p className="text-4xl font-bold text-green-600">
@@ -691,6 +712,22 @@ export default function InterviewPage() {
                       <CheckCircle className="h-5 w-5 text-green-600" />
                       Feedback
                     </h3>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Badge variant={isAnswerCorrect ? "default" : "destructive"}>
+                        {isAnswerCorrect ? "Correct" : "Needs more work"}
+                      </Badge>
+                      {coveragePercent !== null && (
+                        <span className="text-sm text-muted-foreground">
+                          {coveragePercent}% key points covered
+                        </span>
+                      )}
+                      {expectedComplexityLabel && (
+                        <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                          Expected: {expectedComplexityLabel}
+                        </span>
+                      )}
+                    </div>
                     
                     {/* Display the actual submitted answer */}
                     <div className="bg-background/50 p-4 rounded-lg border">
@@ -718,6 +755,50 @@ export default function InterviewPage() {
                         </p>
                       </div>
                     </div>
+
+                    {(matchedConcepts.length > 0 || missingConcepts.length > 0) && (
+                      <div className="grid md:grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-sm font-medium flex items-center gap-2">
+                            <CheckCircle className="h-4 w-4 text-green-600" />
+                            Covered Concepts
+                          </p>
+                          <ul className="text-sm text-muted-foreground space-y-1 mt-2">
+                            {matchedConcepts.length > 0 ? (
+                              matchedConcepts.map((concept: string) => (
+                                <li key={concept}>{concept}</li>
+                              ))
+                            ) : (
+                              <li className="italic">No key concepts detected</li>
+                            )}
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium flex items-center gap-2">
+                            <AlertCircle className="h-4 w-4 text-orange-600" />
+                            Missing Concepts
+                          </p>
+                          <ul className="text-sm text-muted-foreground space-y-1 mt-2">
+                            {missingConcepts.length > 0 ? (
+                              missingConcepts.map((concept: string) => (
+                                <li key={concept}>{concept}</li>
+                              ))
+                            ) : (
+                              <li className="italic">All essential concepts covered</li>
+                            )}
+                          </ul>
+                        </div>
+                      </div>
+                    )}
+
+                    {currentFeedback.evaluation.reference_answer && (
+                      <div className="bg-background/50 p-4 rounded-lg border">
+                        <p className="text-sm font-medium text-muted-foreground mb-2">Model Answer Snapshot:</p>
+                        <p className="text-sm whitespace-pre-wrap text-muted-foreground">
+                          {currentFeedback.evaluation.reference_answer}
+                        </p>
+                      </div>
+                    )}
 
                     <div>
                       <p className="text-sm text-muted-foreground mb-2">Detailed Feedback:</p>

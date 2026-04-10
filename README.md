@@ -86,6 +86,7 @@ Edit `.env` and provide:
 | `SUPABASE_ANON_KEY` | optional | Acts as fallback if the service role key is unavailable. |
 | `ALLOWED_ORIGINS` | ✅ | Comma-separated list of frontend origins (prod domain, staging domain, localhost). |
 | `GITHUB_TOKEN` | optional | Personal access token for higher GitHub API rate limits. |
+| `ENABLE_MOCK_AUTH` | optional | Set `false` in production. Only use `true` for local testing without Supabase token checks. |
 
 Run the API:
 
@@ -146,6 +147,7 @@ uvicorn main:app --reload  # hot-reload server
 - Next.js app can be deployed on Vercel or any Node-friendly host; remember to set `NEXT_PUBLIC_API_BASE` to your backend URL.
 - Configure Supabase service credentials securely (environment variables in your hosting provider).
 - Persist agent runs if you need durability: plug `_store_agent_run` into a database in place of in-memory storage.
+- Do not enable mock auth in production (`ENABLE_MOCK_AUTH=false`).
 
 ### Deployment Checklist
 
@@ -154,6 +156,7 @@ uvicorn main:app --reload  # hot-reload server
 3. Run `uvicorn main:app --host 0.0.0.0 --port 8000` (or your preferred ASGI server) with the same environment variables you validated locally.
 4. Provide the backend base URL to the frontend via `NEXT_PUBLIC_API_BASE` so API calls never target localhost in production.
 5. Configure HTTPS and a CDN (e.g., Vercel/Azure Front Door) to front the Next.js site, and ensure the backend only allows the production origins you listed in `ALLOWED_ORIGINS`.
+6. Validate startup by checking `GET /health` and that authenticated routes reject invalid bearer tokens.
 
 ## License
 

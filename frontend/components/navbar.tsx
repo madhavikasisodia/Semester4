@@ -21,6 +21,7 @@ export function Navbar() {
     { href: "/recommendations", label: "Recommendations" },
     { href: "/progress", label: "Progress" },
     { href: "/interview", label: "Interview" },
+    { href: "/tests", label: "Tests" },
   ]
 
   return (
