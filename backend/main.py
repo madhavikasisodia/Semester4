@@ -74,16 +74,19 @@ SCRAPE_HEADERS = {
 
 QUIZ_SCRAPE_SOURCES: List[Dict[str, str]] = [
     {
+        "id": "google-warmup",
         "name": "Google Interview Warmup",
         "domain": "grow.google",
         "seed_url": "https://grow.google/certificates/interview-warmup/",
     },
     {
+        "id": "exponent",
         "name": "Exponent",
         "domain": "tryexponent.com",
         "seed_url": "https://www.tryexponent.com/questions",
     },
     {
+        "id": "tech-interview-handbook",
         "name": "Tech Interview Handbook",
         "domain": "techinterviewhandbook.org",
         "seed_url": "https://www.techinterviewhandbook.org/",
@@ -267,6 +270,8 @@ class QuizGenerateRequest(BaseModel):
     difficulty: str = Field("medium")
     num_questions: int = Field(10, ge=1, le=20)
     quiz_type: str = Field("mixed")
+    source_mode: str = Field("auto")  # auto | web_only | internal_only
+    scrape_source_ids: Optional[List[str]] = None
 
 
 class QuizAttemptStartRequest(BaseModel):
@@ -325,6 +330,11 @@ def get_settings() -> Settings:
 
 
 supabase_client: Optional[Client] = None
+USER_ACTIVITY_STATS_TABLE = "user_activity_stats"
+USER_ACTIVITY_FIELDS = {
+    "practice_interviews": "practice_interviews",
+    "mock_tests": "mock_tests",
+}
 
 
 def get_supabase_client() -> Client:
@@ -407,6 +417,78 @@ async def _persist_user_profile(client: Client, user_id: str, email: str, metada
         client.table("users").upsert(record).execute()
 
     await run_in_threadpool(_upsert)
+
+
+async def _increment_user_activity_count(user_id: str, metric: str) -> None:
+    column = USER_ACTIVITY_FIELDS.get(metric)
+    if not column:
+        logger.warning("Unknown user activity metric requested: %s", metric)
+        return
+
+    client = get_supabase_client()
+    now_iso = _current_timestamp()
+
+    def _increment() -> None:
+        # Read-then-write keeps implementation simple with Supabase table APIs.
+        response = (
+            client.table(USER_ACTIVITY_STATS_TABLE)
+            .select("practice_interviews,mock_tests")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+
+        if rows:
+            existing = rows[0] or {}
+            next_value = _safe_int(existing.get(column)) + 1
+            (
+                client.table(USER_ACTIVITY_STATS_TABLE)
+                .update({column: next_value, "updated_at": now_iso})
+                .eq("user_id", user_id)
+                .execute()
+            )
+            return
+
+        payload = {
+            "user_id": user_id,
+            "practice_interviews": 1 if column == "practice_interviews" else 0,
+            "mock_tests": 1 if column == "mock_tests" else 0,
+            "updated_at": now_iso,
+        }
+        client.table(USER_ACTIVITY_STATS_TABLE).insert(payload).execute()
+
+    try:
+        await run_in_threadpool(_increment)
+    except Exception:
+        logger.warning("Failed to persist user activity count for %s", user_id, exc_info=True)
+
+
+async def _get_user_activity_stats(user_id: str) -> Dict[str, int]:
+    client = get_supabase_client()
+
+    def _fetch() -> Dict[str, int]:
+        response = (
+            client.table(USER_ACTIVITY_STATS_TABLE)
+            .select("practice_interviews,mock_tests")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return {"practice_interviews": 0, "mock_tests": 0}
+        row = rows[0] or {}
+        return {
+            "practice_interviews": _safe_int(row.get("practice_interviews")),
+            "mock_tests": _safe_int(row.get("mock_tests")),
+        }
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch user activity stats for %s", user_id, exc_info=True)
+        return {"practice_interviews": 0, "mock_tests": 0}
 
 
 def _utcnow() -> datetime:
@@ -616,19 +698,35 @@ async def _scrape_quiz_resource(link: Dict[str, str], source_name: str, user_que
     }
 
 
-async def _scrape_quiz_candidates_from_interview_sites(user_query: str, limit: int = QUIZ_SCRAPE_DOC_LIMIT) -> List[Dict[str, Any]]:
+async def _scrape_quiz_candidates_from_interview_sites(
+    user_query: str,
+    limit: int = QUIZ_SCRAPE_DOC_LIMIT,
+    source_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
     query = (user_query or "").strip()
     if not query:
         return []
 
+    allowed_source_ids = {
+        (source_id or "").strip().lower()
+        for source_id in (source_ids or [])
+        if (source_id or "").strip()
+    }
+    selected_sources = [
+        source for source in QUIZ_SCRAPE_SOURCES
+        if not allowed_source_ids or source.get("id", "").lower() in allowed_source_ids
+    ]
+    if not selected_sources:
+        return []
+
     search_tasks = [
         asyncio.create_task(_search_source_links(source, query, QUIZ_SEARCH_RESULTS_PER_SOURCE))
-        for source in QUIZ_SCRAPE_SOURCES
+        for source in selected_sources
     ]
     search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
     scrape_tasks: List[asyncio.Task] = []
-    for source, result in zip(QUIZ_SCRAPE_SOURCES, search_results):
+    for source, result in zip(selected_sources, search_results):
         if isinstance(result, Exception):
             logger.warning("Quiz source search task failed for %s: %s", source["name"], result)
             continue
@@ -1953,6 +2051,88 @@ def _normalize_quiz_text(value: Optional[str]) -> str:
     return (value or "").strip().lower()
 
 
+QUIZ_RELEVANCE_STOP_WORDS = {
+    "and", "the", "for", "with", "from", "that", "this", "what", "when", "where",
+    "which", "into", "your", "about", "using", "used", "have", "will", "their", "topic",
+    "subject", "question", "questions", "problem", "interview", "practice", "guide", "basic",
+}
+
+
+def _quiz_relevance_tokens(value: Optional[str]) -> List[str]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9\-]{2,}", _normalize_quiz_text(value))
+    return [word for word in words if word not in QUIZ_RELEVANCE_STOP_WORDS]
+
+
+def _score_quiz_candidate(candidate: Dict[str, Any], subject: str, topic: Optional[str]) -> int:
+    subject_text = _normalize_quiz_text(subject)
+    topic_text = _normalize_quiz_text(topic)
+
+    searchable = " ".join(
+        [
+            _normalize_quiz_text(candidate.get("title")),
+            _normalize_quiz_text(candidate.get("description")),
+            _normalize_quiz_text(candidate.get("source")),
+            " ".join(_normalize_quiz_text(tag) for tag in candidate.get("tags", []) or []),
+            " ".join(_normalize_quiz_text(company) for company in candidate.get("companies", []) or []),
+        ]
+    )
+
+    score = 0
+    if subject_text and subject_text in searchable:
+        score += 8
+    if topic_text and topic_text in searchable:
+        score += 8
+
+    query_tokens = set(_quiz_relevance_tokens(f"{subject_text} {topic_text}"))
+    if query_tokens:
+        overlap = sum(1 for token in query_tokens if token in searchable)
+        score += overlap * 2
+
+    tags = [
+        _normalize_quiz_text(tag).replace("-", " ")
+        for tag in (candidate.get("tags", []) or [])
+        if _normalize_quiz_text(tag)
+    ]
+    for token in query_tokens:
+        if any(token in tag for tag in tags):
+            score += 1
+
+    return score
+
+
+def _rank_quiz_candidates(
+    candidates: List[Dict[str, Any]],
+    subject: str,
+    topic: Optional[str],
+    *,
+    min_score: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    scored: List[Tuple[int, Dict[str, Any]]] = []
+    for candidate in candidates:
+        scored.append((_score_quiz_candidate(candidate, subject, topic), candidate))
+
+    ranked = sorted(
+        scored,
+        key=lambda item: (item[0], _normalize_quiz_text(item[1].get("title"))),
+        reverse=True,
+    )
+
+    if min_score is not None:
+        ranked = [item for item in ranked if item[0] >= min_score]
+
+    seen_titles: set[str] = set()
+    unique_ranked: List[Dict[str, Any]] = []
+    for _, candidate in ranked:
+        title_key = _normalize_quiz_text(candidate.get("title"))
+        if title_key and title_key in seen_titles:
+            continue
+        if title_key:
+            seen_titles.add(title_key)
+        unique_ranked.append(candidate)
+
+    return unique_ranked
+
+
 def _filter_quiz_candidates(subject: str, topic: Optional[str], difficulty: str) -> List[Dict[str, Any]]:
     all_questions = _flatten_questions()
     requested_difficulty = _normalize_quiz_text(difficulty)
@@ -1985,30 +2165,47 @@ def _filter_quiz_candidates(subject: str, topic: Optional[str], difficulty: str)
 
         matched = [q for q in filtered if _matches(q)]
         if matched:
-            return matched
+            return _rank_quiz_candidates(matched, subject, topic)
 
     if filtered:
-        return filtered
-    return all_questions
+        return _rank_quiz_candidates(filtered, subject, topic)
+    return _rank_quiz_candidates(all_questions, subject, topic)
 
 
 def _build_mcq_from_question(raw_question: Dict[str, Any], quiz_id: int, question_order: int) -> Dict[str, Any]:
     tags = [str(tag).strip() for tag in raw_question.get("tags", []) if str(tag).strip()]
     source = str(raw_question.get("source") or "general").strip().title()
     title = str(raw_question.get("title") or "Interview Question").strip()
+    description = str(raw_question.get("description") or "").strip()
+    concept_pool = [
+        "Two pointers",
+        "Sliding window",
+        "Hash map",
+        "Dynamic programming",
+        "Greedy approach",
+        "Binary search",
+        "Stack",
+        "Queue",
+        "Graph traversal",
+        "Recursion",
+        "Time complexity",
+        "Edge cases",
+    ]
 
     if tags:
         correct_answer = tags[0].title()
-        distractors = [
-            tags[1].title() if len(tags) > 1 else "Time complexity",
-            source,
-            "Edge cases",
-        ]
-        prompt = f"Which concept is most central to this topic: {title}?"
+        distractors = [tag.title() for tag in tags[1:3]]
+        for concept in concept_pool:
+            if concept.lower() != correct_answer.lower() and concept not in distractors:
+                distractors.append(concept)
+            if len(distractors) >= 3:
+                break
+        context_text = description if description else title
+        prompt = f"Based on this question context, which concept is most relevant? {context_text}"
     else:
         correct_answer = str(raw_question.get("difficulty") or "medium").title()
         distractors = ["Easy", "Medium", "Hard"]
-        prompt = f"What is the difficulty level for this problem: {title}?"
+        prompt = f"What is the most likely difficulty level for this problem: {title}?"
 
     options = [correct_answer] + [item for item in distractors if item != correct_answer]
     deduped: List[str] = []
@@ -2791,6 +2988,7 @@ async def submit_answer(
     if done:
         session["status"] = "completed"
         session["end_time"] = _current_timestamp()
+        await _increment_user_activity_count(current_user["id"], "practice_interviews")
     next_question = None
     if not done:
         nxt = session["questions"][session["current_index"]]
@@ -2913,6 +3111,22 @@ async def list_quizzes(
     return ordered[:limit]
 
 
+@app.get("/quiz/scrape-sources")
+async def list_quiz_scrape_sources(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, str]]:
+    _ = current_user
+    return [
+        {
+            "id": source.get("id", ""),
+            "name": source.get("name", ""),
+            "domain": source.get("domain", ""),
+            "seed_url": source.get("seed_url", ""),
+        }
+        for source in QUIZ_SCRAPE_SOURCES
+    ]
+
+
 @app.post("/quiz/generate")
 async def generate_quiz(
     request: QuizGenerateRequest,
@@ -2923,18 +3137,56 @@ async def generate_quiz(
     if not subject:
         raise HTTPException(status_code=400, detail="Subject is required")
 
+    source_mode = (request.source_mode or "auto").strip().lower()
+    if source_mode not in {"auto", "web_only", "internal_only"}:
+        raise HTTPException(status_code=400, detail="source_mode must be one of: auto, web_only, internal_only")
+
+    selected_source_ids = [
+        source_id.strip().lower()
+        for source_id in (request.scrape_source_ids or [])
+        if source_id and source_id.strip()
+    ]
+
     search_query = " ".join(part for part in [subject, request.topic or ""] if part).strip()
-    scraped_candidates = await _scrape_quiz_candidates_from_interview_sites(search_query)
+    scraped_candidates: List[Dict[str, Any]] = []
+    if source_mode in {"auto", "web_only"}:
+        scraped_candidates = await _scrape_quiz_candidates_from_interview_sites(
+            search_query,
+            source_ids=selected_source_ids,
+        )
     for candidate in scraped_candidates:
         candidate["difficulty"] = request.difficulty.lower()
 
-    candidates = scraped_candidates or _filter_quiz_candidates(subject, request.topic, request.difficulty)
+    ranked_scraped = _rank_quiz_candidates(scraped_candidates, subject, request.topic, min_score=3)
+
+    internal_candidates: List[Dict[str, Any]] = []
+    if source_mode in {"auto", "internal_only"}:
+        internal_candidates = _filter_quiz_candidates(subject, request.topic, request.difficulty)
+    ranked_internal = _rank_quiz_candidates(internal_candidates, subject, request.topic)
+
+    if source_mode == "web_only":
+        candidates = ranked_scraped
+    elif source_mode == "internal_only":
+        candidates = ranked_internal
+    else:
+        candidates = ranked_scraped or ranked_internal
+
+    if source_mode == "web_only" and not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail="No web-scraped questions found for this query. Try auto mode or internal questions.",
+        )
+
     if not candidates:
         raise HTTPException(status_code=404, detail="No questions available to generate a quiz")
 
     selected: List[Dict[str, Any]] = []
-    while len(selected) < request.num_questions:
-        selected.append(random.choice(candidates))
+    if len(candidates) >= request.num_questions:
+        selected = random.sample(candidates, request.num_questions)
+    else:
+        selected = candidates.copy()
+        while len(selected) < request.num_questions:
+            selected.append(random.choice(candidates))
 
     quiz_id = next(QUIZ_ID_COUNTER)
     quiz_title = f"{subject.title()} Quiz"
@@ -2951,7 +3203,7 @@ async def generate_quiz(
         "total_questions": request.num_questions,
         "time_limit_minutes": max(5, request.num_questions * 2),
         "quiz_type": request.quiz_type,
-        "content_source": "web_scraped" if scraped_candidates else "internal_bank",
+        "content_source": "web_scraped" if (source_mode != "internal_only" and scraped_candidates) else "internal_bank",
         "created_at": created_at,
     }
 
@@ -3065,6 +3317,7 @@ async def submit_quiz_attempt(
 
     attempt["status"] = "submitted"
     attempt["submitted_at"] = submitted_at
+    await _increment_user_activity_count(user_id, "mock_tests")
 
     feedback = (
         "Great work. Your fundamentals look solid."
@@ -3089,6 +3342,19 @@ async def submit_quiz_attempt(
         "strengths": strong_topics[:5],
         "weaknesses": weak_topics[:5],
         "recommended_topics": weak_topics[:5],
+    }
+
+
+@app.get("/users/activity-stats")
+async def get_user_activity_stats(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    stats = await _get_user_activity_stats(user_id)
+    return {
+        "user_id": user_id,
+        "practice_interviews": stats["practice_interviews"],
+        "mock_tests": stats["mock_tests"],
     }
 
 

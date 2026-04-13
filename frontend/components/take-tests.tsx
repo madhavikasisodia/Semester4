@@ -75,6 +75,13 @@ interface QuizResult {
   recommended_topics: string[] | null
 }
 
+interface ScrapeSource {
+  id: string
+  name: string
+  domain: string
+  seed_url: string
+}
+
 export default function TakeTestsPage() {
   const router = useRouter()
   const { user } = useAuthStore()
@@ -95,6 +102,9 @@ export default function TakeTestsPage() {
   const [topic, setTopic] = useState("")
   const [difficulty, setDifficulty] = useState("medium")
   const [numQuestions, setNumQuestions] = useState(10)
+  const [sourceMode, setSourceMode] = useState("auto")
+  const [scrapeSourceId, setScrapeSourceId] = useState("all")
+  const [scrapeSources, setScrapeSources] = useState<ScrapeSource[]>([])
 
   useEffect(() => {
     if (!user) {
@@ -102,6 +112,7 @@ export default function TakeTestsPage() {
       return
     }
     fetchQuizzes()
+    fetchScrapeSources()
   }, [user])
 
   // Timer
@@ -142,6 +153,22 @@ export default function TakeTestsPage() {
     }
   }
 
+  const fetchScrapeSources = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/quiz/scrape-sources`, {
+        headers: getAuthHeader(),
+      })
+      if (response.ok) {
+        const data = await response.json()
+        if (Array.isArray(data)) {
+          setScrapeSources(data)
+        }
+      }
+    } catch (error) {
+      console.error("Error fetching quiz scrape sources:", error)
+    }
+  }
+
   const handleGenerateQuiz = async () => {
     if (!subject) {
       alert("Please enter a subject")
@@ -162,6 +189,8 @@ export default function TakeTestsPage() {
           difficulty,
           num_questions: numQuestions,
           quiz_type: "mixed",
+          source_mode: sourceMode,
+          scrape_source_ids: scrapeSourceId === "all" ? null : [scrapeSourceId],
         }),
       })
 
@@ -174,6 +203,8 @@ export default function TakeTestsPage() {
         setTopic("")
         setDifficulty("medium")
         setNumQuestions(10)
+        setSourceMode("auto")
+        setScrapeSourceId("all")
       } else {
         const error = await response.json()
         alert(`Failed to generate quiz: ${error.detail}`)
@@ -561,6 +592,37 @@ export default function TakeTestsPage() {
                     </SelectContent>
                   </Select>
                 </div>
+                <div>
+                  <Label htmlFor="sourceMode">Question Source</Label>
+                  <Select value={sourceMode} onValueChange={setSourceMode}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto (Web + Internal fallback)</SelectItem>
+                      <SelectItem value="web_only">Web scraped only</SelectItem>
+                      <SelectItem value="internal_only">Internal bank only</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {sourceMode !== "internal_only" && (
+                  <div>
+                    <Label htmlFor="scrapeSource">Web Source</Label>
+                    <Select value={scrapeSourceId} onValueChange={setScrapeSourceId}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All web sources</SelectItem>
+                        {scrapeSources.map((source) => (
+                          <SelectItem key={source.id} value={source.id}>
+                            {source.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 <div className="flex gap-4 pt-4">
                   <Button onClick={() => setShowGenerator(false)} variant="outline" className="flex-1">
                     Cancel
