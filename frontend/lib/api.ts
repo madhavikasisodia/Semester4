@@ -232,6 +232,43 @@ export interface ProgressStats {
   avg_test_score: number
 }
 
+export interface UserActivityStats {
+  user_id: string
+  practice_interviews: number
+  mock_tests: number
+}
+
+export interface LearningRoadmap {
+  user_id: string
+  title: string
+  focus_topics: string[]
+  generated_at: string
+  weeks: Array<{
+    week: number
+    goal: string
+    tasks: string[]
+  }>
+}
+
+export interface ReminderItem {
+  id: number
+  reminder_type: string
+  title: string
+  message: string
+  status: "pending" | "done" | "dismissed"
+  due_at?: string | null
+  metadata?: Record<string, any>
+  created_at?: string
+}
+
+export interface ReadinessAnalytics {
+  readiness_score: number
+  avg_test_score: number
+  practice_interviews: number
+  mock_tests: number
+  weak_topics: string[]
+}
+
 export interface ProgressHistory {
   id: number
   user_id: number
@@ -691,6 +728,39 @@ export const learningAPI = {
     progress_stats: ProgressStats
   }> {
     const { data } = await api.get("/dashboard/overview")
+    return data
+  },
+
+  async getActivityStats(): Promise<UserActivityStats> {
+    const { data } = await api.get("/users/activity-stats")
+    return data
+  },
+
+  async getLearningRoadmap(): Promise<LearningRoadmap> {
+    const { data } = await api.get("/learning/roadmap")
+    return data
+  },
+
+  async regenerateLearningRoadmap(): Promise<LearningRoadmap> {
+    const { data } = await api.post("/learning/roadmap/generate")
+    return data
+  },
+
+  async getReminders(): Promise<ReminderItem[]> {
+    const { data } = await api.get("/notifications/reminders")
+    return data
+  },
+
+  async updateReminderStatus(
+    reminderId: number,
+    status: "pending" | "done" | "dismissed"
+  ): Promise<{ message: string }> {
+    const { data } = await api.put(`/notifications/reminders/${reminderId}/status?status=${status}`)
+    return data
+  },
+
+  async getReadinessAnalytics(): Promise<ReadinessAnalytics> {
+    const { data } = await api.get("/analytics/readiness")
     return data
   },
 }

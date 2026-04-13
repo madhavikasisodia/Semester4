@@ -335,6 +335,11 @@ USER_ACTIVITY_FIELDS = {
     "practice_interviews": "practice_interviews",
     "mock_tests": "mock_tests",
 }
+INTERVIEW_SESSIONS_TABLE = "interview_sessions"
+USER_QUIZZES_TABLE = "user_quizzes"
+QUIZ_ATTEMPTS_TABLE = "quiz_attempts"
+LEARNING_ROADMAPS_TABLE = "user_learning_roadmaps"
+USER_REMINDERS_TABLE = "user_reminders"
 
 
 def get_supabase_client() -> Client:
@@ -489,6 +494,469 @@ async def _get_user_activity_stats(user_id: str) -> Dict[str, int]:
     except Exception:
         logger.warning("Failed to fetch user activity stats for %s", user_id, exc_info=True)
         return {"practice_interviews": 0, "mock_tests": 0}
+
+
+async def _persist_interview_session(user_id: str, session_data: Dict[str, Any]) -> None:
+    client = get_supabase_client()
+    payload = {
+        "session_id": session_data["session_id"],
+        "user_id": user_id,
+        "status": session_data.get("status", "active"),
+        "session_data": session_data,
+        "start_time": session_data.get("start_time"),
+        "end_time": session_data.get("end_time"),
+        "updated_at": _current_timestamp(),
+    }
+
+    def _upsert() -> None:
+        client.table(INTERVIEW_SESSIONS_TABLE).upsert(payload).execute()
+
+    try:
+        await run_in_threadpool(_upsert)
+    except Exception:
+        logger.warning("Failed to persist interview session %s", session_data.get("session_id"), exc_info=True)
+
+
+async def _fetch_interview_session(user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(INTERVIEW_SESSIONS_TABLE)
+            .select("session_data")
+            .eq("session_id", session_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        row = rows[0] or {}
+        session_data = row.get("session_data")
+        if isinstance(session_data, dict):
+            return session_data
+        return None
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch interview session %s", session_id, exc_info=True)
+        return None
+
+
+async def _list_active_interview_sessions(user_id: str) -> List[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> List[Dict[str, Any]]:
+        response = (
+            client.table(INTERVIEW_SESSIONS_TABLE)
+            .select("session_data")
+            .eq("user_id", user_id)
+            .eq("status", "active")
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        sessions: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = (row or {}).get("session_data")
+            if isinstance(payload, dict):
+                sessions.append(payload)
+        return sessions
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to list active interview sessions for %s", user_id, exc_info=True)
+        return []
+
+
+async def _persist_quiz(user_id: str, quiz_record: Dict[str, Any], questions: List[Dict[str, Any]]) -> Optional[int]:
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "quiz_data": {
+            "quiz": quiz_record,
+            "questions": questions,
+        },
+        "updated_at": _current_timestamp(),
+    }
+
+    def _insert() -> Optional[int]:
+        response = (
+            client.table(USER_QUIZZES_TABLE)
+            .insert(payload)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        return _safe_int((rows[0] or {}).get("id"))
+
+    try:
+        return await run_in_threadpool(_insert)
+    except Exception:
+        logger.warning("Failed to persist quiz for %s", user_id, exc_info=True)
+        return None
+
+
+async def _fetch_user_quizzes(user_id: str, limit: int) -> List[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> List[Dict[str, Any]]:
+        response = (
+            client.table(USER_QUIZZES_TABLE)
+            .select("id,quiz_data,created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        quizzes: List[Dict[str, Any]] = []
+        for row in rows:
+            record = row or {}
+            quiz_data = record.get("quiz_data") or {}
+            quiz = quiz_data.get("quiz") or {}
+            if not isinstance(quiz, dict):
+                continue
+            quiz["id"] = _safe_int(record.get("id"))
+            quiz["created_at"] = quiz.get("created_at") or record.get("created_at")
+            quizzes.append(quiz)
+        return quizzes
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch quizzes for %s", user_id, exc_info=True)
+        return []
+
+
+async def _fetch_quiz_bundle(user_id: str, quiz_id: int) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(USER_QUIZZES_TABLE)
+            .select("id,quiz_data,created_at")
+            .eq("id", quiz_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        row = rows[0] or {}
+        quiz_data = row.get("quiz_data") or {}
+        if not isinstance(quiz_data, dict):
+            return None
+        return {
+            "id": _safe_int(row.get("id")),
+            "created_at": row.get("created_at"),
+            "quiz": quiz_data.get("quiz") or {},
+            "questions": quiz_data.get("questions") or [],
+        }
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch quiz bundle %s for %s", quiz_id, user_id, exc_info=True)
+        return None
+
+
+async def _create_quiz_attempt(user_id: str, quiz_id: int) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "quiz_id": quiz_id,
+        "status": "in_progress",
+        "started_at": _current_timestamp(),
+        "updated_at": _current_timestamp(),
+    }
+
+    def _insert() -> Optional[Dict[str, Any]]:
+        response = client.table(QUIZ_ATTEMPTS_TABLE).insert(payload).execute()
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        row = rows[0] or {}
+        return {
+            "id": _safe_int(row.get("id")),
+            "quiz_id": _safe_int(row.get("quiz_id")),
+            "status": row.get("status") or "in_progress",
+            "started_at": row.get("started_at") or payload["started_at"],
+        }
+
+    try:
+        return await run_in_threadpool(_insert)
+    except Exception:
+        logger.warning("Failed to create quiz attempt for %s", user_id, exc_info=True)
+        return None
+
+
+async def _fetch_quiz_attempt(user_id: str, attempt_id: int) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(QUIZ_ATTEMPTS_TABLE)
+            .select("id,user_id,quiz_id,status,started_at,submitted_at,result_data")
+            .eq("id", attempt_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        return rows[0] or None
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch quiz attempt %s", attempt_id, exc_info=True)
+        return None
+
+
+async def _submit_quiz_attempt_result(user_id: str, attempt_id: int, result: Dict[str, Any]) -> None:
+    client = get_supabase_client()
+    payload = {
+        "status": "submitted",
+        "submitted_at": _current_timestamp(),
+        "result_data": result,
+        "updated_at": _current_timestamp(),
+    }
+
+    def _update() -> None:
+        (
+            client.table(QUIZ_ATTEMPTS_TABLE)
+            .update(payload)
+            .eq("id", attempt_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+
+    try:
+        await run_in_threadpool(_update)
+    except Exception:
+        logger.warning("Failed to persist quiz attempt result %s", attempt_id, exc_info=True)
+
+
+async def _fetch_quiz_attempt_results(user_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> List[Dict[str, Any]]:
+        response = (
+            client.table(QUIZ_ATTEMPTS_TABLE)
+            .select("result_data,submitted_at")
+            .eq("user_id", user_id)
+            .eq("status", "submitted")
+            .order("submitted_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        values: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = (row or {}).get("result_data")
+            if isinstance(payload, dict):
+                values.append(payload)
+        return values
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch quiz attempt results for %s", user_id, exc_info=True)
+        return []
+
+
+def _build_user_learning_roadmap(user_id: str, quiz_results: List[Dict[str, Any]], activity: Dict[str, int]) -> Dict[str, Any]:
+    weak_topic_counts: Dict[str, int] = {}
+    for result in quiz_results:
+        for topic in result.get("recommended_topics", []) or []:
+            key = str(topic).strip().lower()
+            if not key:
+                continue
+            weak_topic_counts[key] = weak_topic_counts.get(key, 0) + 1
+
+    ranked_weak_topics = sorted(weak_topic_counts.items(), key=lambda item: item[1], reverse=True)
+    focus_topics = [name for name, _ in ranked_weak_topics[:5]]
+    if not focus_topics:
+        focus_topics = ["data structures", "algorithms", "system design"]
+
+    interview_target = max(2, 5 - min(activity.get("practice_interviews", 0), 3))
+    test_target = max(2, 6 - min(activity.get("mock_tests", 0), 4))
+
+    return {
+        "user_id": user_id,
+        "title": "4-Week Interview Roadmap",
+        "weeks": [
+            {
+                "week": 1,
+                "goal": "Rebuild fundamentals",
+                "tasks": [
+                    f"Practice {focus_topics[0]} questions (45 min/day)",
+                    f"Attempt {test_target // 2} focused mock tests",
+                ],
+            },
+            {
+                "week": 2,
+                "goal": "Sharpen weak areas",
+                "tasks": [
+                    f"Deep dive on {focus_topics[1] if len(focus_topics) > 1 else focus_topics[0]}",
+                    "Review mistakes and create flash notes",
+                ],
+            },
+            {
+                "week": 3,
+                "goal": "Interview simulation",
+                "tasks": [
+                    f"Complete {interview_target} mock interviews",
+                    "Record and review communication clarity",
+                ],
+            },
+            {
+                "week": 4,
+                "goal": "Final readiness sprint",
+                "tasks": [
+                    "Take full-length mock tests under time pressure",
+                    "Polish resume stories and STAR examples",
+                ],
+            },
+        ],
+        "focus_topics": focus_topics,
+        "generated_at": _current_timestamp(),
+    }
+
+
+async def _persist_learning_roadmap(user_id: str, roadmap: Dict[str, Any]) -> None:
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "title": roadmap.get("title") or "Learning Roadmap",
+        "status": "active",
+        "roadmap_data": roadmap,
+        "updated_at": _current_timestamp(),
+    }
+
+    def _insert() -> None:
+        client.table(LEARNING_ROADMAPS_TABLE).insert(payload).execute()
+
+    try:
+        await run_in_threadpool(_insert)
+    except Exception:
+        logger.warning("Failed to persist learning roadmap for %s", user_id, exc_info=True)
+
+
+async def _fetch_latest_learning_roadmap(user_id: str) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(LEARNING_ROADMAPS_TABLE)
+            .select("roadmap_data")
+            .eq("user_id", user_id)
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        payload = (rows[0] or {}).get("roadmap_data")
+        return payload if isinstance(payload, dict) else None
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch roadmap for %s", user_id, exc_info=True)
+        return None
+
+
+def _build_default_reminders(activity: Dict[str, int]) -> List[Dict[str, Any]]:
+    reminders: List[Dict[str, Any]] = []
+    now = _utcnow()
+    reminders.append(
+        {
+            "reminder_type": "practice",
+            "title": "Daily Coding Warmup",
+            "message": "Solve 2 timed questions today to maintain momentum.",
+            "status": "pending",
+            "due_at": _isoformat(now + timedelta(hours=8)),
+            "metadata": {"target_questions": 2},
+        }
+    )
+    if activity.get("practice_interviews", 0) < 3:
+        reminders.append(
+            {
+                "reminder_type": "interview",
+                "title": "Schedule Mock Interview",
+                "message": "Book one mock interview session this week.",
+                "status": "pending",
+                "due_at": _isoformat(now + timedelta(days=2)),
+                "metadata": {"target_sessions": 1},
+            }
+        )
+    if activity.get("mock_tests", 0) < 4:
+        reminders.append(
+            {
+                "reminder_type": "assessment",
+                "title": "Take a Full Mock Test",
+                "message": "Complete one full mock test and review weak topics.",
+                "status": "pending",
+                "due_at": _isoformat(now + timedelta(days=1)),
+                "metadata": {"target_tests": 1},
+            }
+        )
+    return reminders
+
+
+async def _upsert_default_reminders(user_id: str, reminders: List[Dict[str, Any]]) -> None:
+    client = get_supabase_client()
+
+    def _insert_many() -> None:
+        existing = (
+            client.table(USER_REMINDERS_TABLE)
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("status", "pending")
+            .limit(1)
+            .execute()
+        )
+        if getattr(existing, "data", None):
+            return
+        payload = [{**item, "user_id": user_id, "updated_at": _current_timestamp()} for item in reminders]
+        if payload:
+            client.table(USER_REMINDERS_TABLE).insert(payload).execute()
+
+    try:
+        await run_in_threadpool(_insert_many)
+    except Exception:
+        logger.warning("Failed to upsert reminders for %s", user_id, exc_info=True)
+
+
+async def _fetch_user_reminders(user_id: str, status: str = "pending") -> List[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> List[Dict[str, Any]]:
+        response = (
+            client.table(USER_REMINDERS_TABLE)
+            .select("id,reminder_type,title,message,status,due_at,metadata,created_at")
+            .eq("user_id", user_id)
+            .eq("status", status)
+            .order("due_at", desc=False)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return [row or {} for row in rows]
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch reminders for %s", user_id, exc_info=True)
+        return []
 
 
 def _utcnow() -> datetime:
@@ -2899,11 +3367,17 @@ async def list_certificates(current_user: Dict[str, Any] = Depends(get_current_u
 # ----------------------- Interview APIs -----------------------
 
 
-def _get_session_or_404(session_id: str) -> Dict[str, Any]:
+async def _get_session_or_404(user_id: str, session_id: str) -> Dict[str, Any]:
     session = INTERVIEW_SESSIONS.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Interview session not found")
-    return session
+    if session is not None:
+        return session
+
+    persisted = await _fetch_interview_session(user_id, session_id)
+    if persisted is not None:
+        INTERVIEW_SESSIONS[session_id] = persisted
+        return persisted
+
+    raise HTTPException(status_code=404, detail="Interview session not found")
 
 
 @app.get("/interview/personas")
@@ -2916,7 +3390,7 @@ async def start_interview(
     request: InterviewStartRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    _ = current_user
+    user_id = current_user["id"]
     persona = next((p for p in INTERVIEW_PERSONAS if p["persona_id"] == request.persona), None)
     if persona is None:
         raise HTTPException(status_code=404, detail="Persona not found")
@@ -2944,6 +3418,7 @@ async def start_interview(
         "interviewer": persona,
     }
     INTERVIEW_SESSIONS[session_id] = session_data
+    await _persist_interview_session(user_id, session_data)
     current_question = questions[0]
     return {
         "session_id": session_id,
@@ -2974,8 +3449,8 @@ async def submit_answer(
     audio_duration: Optional[float] = Query(None, ge=0),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    _ = current_user
-    session = _get_session_or_404(session_id)
+    user_id = current_user["id"]
+    session = await _get_session_or_404(user_id, session_id)
     if session["status"] == "completed":
         raise HTTPException(status_code=400, detail="Interview session already completed")
     question = session["questions"][session["current_index"]]
@@ -2988,7 +3463,8 @@ async def submit_answer(
     if done:
         session["status"] = "completed"
         session["end_time"] = _current_timestamp()
-        await _increment_user_activity_count(current_user["id"], "practice_interviews")
+        await _increment_user_activity_count(user_id, "practice_interviews")
+    await _persist_interview_session(user_id, session)
     next_question = None
     if not done:
         nxt = session["questions"][session["current_index"]]
@@ -3021,8 +3497,7 @@ async def interview_status(
     session_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    _ = current_user
-    session = _get_session_or_404(session_id)
+    session = await _get_session_or_404(current_user["id"], session_id)
     return {
         "session_id": session_id,
         "status": session["status"],
@@ -3043,8 +3518,7 @@ async def interview_report(
     session_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    _ = current_user
-    session = _get_session_or_404(session_id)
+    session = await _get_session_or_404(current_user["id"], session_id)
     return _build_interview_report(session)
 
 
@@ -3053,27 +3527,42 @@ async def delete_interview(
     session_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, str]:
-    _ = current_user
-    _get_session_or_404(session_id)
+    user_id = current_user["id"]
+    session = await _get_session_or_404(user_id, session_id)
+    session["status"] = "deleted"
     INTERVIEW_SESSIONS.pop(session_id, None)
+    await _persist_interview_session(user_id, session)
     return {"message": "Interview session deleted"}
 
 
 @app.get("/interview/sessions/active")
 async def active_sessions(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    _ = current_user
+    user_id = current_user["id"]
+    persisted = await _list_active_interview_sessions(user_id)
     sessions = [
         {
-            "session_id": session_id,
-            "candidate_name": data["candidate_name"],
-            "target_role": data["target_role"],
-            "status": data["status"],
-            "questions_answered": data["questions_answered"],
-            "start_time": data["start_time"],
+            "session_id": data.get("session_id"),
+            "candidate_name": data.get("candidate_name"),
+            "target_role": data.get("target_role"),
+            "status": data.get("status"),
+            "questions_answered": _safe_int(data.get("questions_answered")),
+            "start_time": data.get("start_time"),
         }
-        for session_id, data in INTERVIEW_SESSIONS.items()
-        if data["status"] != "completed"
+        for data in persisted
     ]
+    if not sessions:
+        sessions = [
+            {
+                "session_id": session_id,
+                "candidate_name": data["candidate_name"],
+                "target_role": data["target_role"],
+                "status": data["status"],
+                "questions_answered": data["questions_answered"],
+                "start_time": data["start_time"],
+            }
+            for session_id, data in INTERVIEW_SESSIONS.items()
+            if data["status"] != "completed"
+        ]
     return {"total_sessions": len(sessions), "sessions": sessions}
 
 
@@ -3106,6 +3595,9 @@ async def list_quizzes(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> List[Dict[str, Any]]:
     user_id = current_user["id"]
+    persisted = await _fetch_user_quizzes(user_id, limit)
+    if persisted:
+        return persisted[:limit]
     quizzes = USER_QUIZZES.get(user_id, [])
     ordered = sorted(quizzes, key=lambda quiz: quiz.get("created_at", ""), reverse=True)
     return ordered[:limit]
@@ -3216,6 +3708,15 @@ async def generate_quiz(
         for index, raw_question in enumerate(selected, start=1)
     ]
 
+    persisted_id = await _persist_quiz(user_id, quiz_record, QUIZ_QUESTIONS[quiz_id])
+    if persisted_id:
+        quiz_record["id"] = persisted_id
+        QUIZ_QUESTIONS[persisted_id] = QUIZ_QUESTIONS.pop(quiz_id)
+        for question in QUIZ_QUESTIONS[persisted_id]:
+            question["quiz_id"] = persisted_id
+        if USER_QUIZZES.get(user_id):
+            USER_QUIZZES[user_id][-1]["id"] = persisted_id
+
     return quiz_record
 
 
@@ -3225,6 +3726,24 @@ async def get_quiz(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
     user_id = current_user["id"]
+    persisted = await _fetch_quiz_bundle(user_id, quiz_id)
+    if persisted:
+        quiz = persisted.get("quiz") or {}
+        questions = persisted.get("questions") or []
+        if isinstance(quiz, dict):
+            quiz["id"] = quiz_id
+            return {
+                **quiz,
+                "questions": [
+                    {
+                        key: value
+                        for key, value in (question or {}).items()
+                        if key != "_correct_answer"
+                    }
+                    for question in questions
+                ],
+            }
+
     quiz = _get_user_quiz_or_404(user_id, quiz_id)
     return {
         **quiz,
@@ -3238,7 +3757,19 @@ async def start_quiz_attempt(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
     user_id = current_user["id"]
-    _get_user_quiz_or_404(user_id, request.quiz_id)
+
+    persisted_quiz = await _fetch_quiz_bundle(user_id, request.quiz_id)
+    if not persisted_quiz:
+        _get_user_quiz_or_404(user_id, request.quiz_id)
+
+    persisted_attempt = await _create_quiz_attempt(user_id, request.quiz_id)
+    if persisted_attempt:
+        return {
+            "id": persisted_attempt["id"],
+            "quiz_id": persisted_attempt["quiz_id"],
+            "status": persisted_attempt["status"],
+            "started_at": persisted_attempt["started_at"],
+        }
 
     attempt_id = next(QUIZ_ATTEMPT_ID_COUNTER)
     started_at = _utcnow()
@@ -3266,13 +3797,32 @@ async def submit_quiz_attempt(
 ) -> Dict[str, Any]:
     user_id = current_user["id"]
     attempt = QUIZ_ATTEMPTS.get(request.attempt_id)
+    persisted_attempt = await _fetch_quiz_attempt(user_id, request.attempt_id)
+    if persisted_attempt:
+        attempt = {
+            "id": _safe_int(persisted_attempt.get("id")),
+            "quiz_id": _safe_int(persisted_attempt.get("quiz_id")),
+            "user_id": user_id,
+            "started_at": persisted_attempt.get("started_at"),
+            "submitted_at": persisted_attempt.get("submitted_at"),
+            "status": persisted_attempt.get("status"),
+        }
+
     if not attempt or attempt.get("user_id") != user_id:
         raise HTTPException(status_code=404, detail="Quiz attempt not found")
     if attempt.get("status") == "submitted":
         raise HTTPException(status_code=400, detail="Quiz attempt already submitted")
 
-    quiz = _get_user_quiz_or_404(user_id, int(attempt["quiz_id"]))
-    questions = QUIZ_QUESTIONS.get(int(attempt["quiz_id"]), [])
+    quiz_bundle = await _fetch_quiz_bundle(user_id, int(attempt["quiz_id"]))
+    if quiz_bundle:
+        quiz = quiz_bundle.get("quiz") or {}
+        if isinstance(quiz, dict):
+            quiz["id"] = _safe_int(attempt["quiz_id"])
+        questions = quiz_bundle.get("questions") or []
+    else:
+        quiz = _get_user_quiz_or_404(user_id, int(attempt["quiz_id"]))
+        questions = QUIZ_QUESTIONS.get(int(attempt["quiz_id"]), [])
+
     if not questions:
         raise HTTPException(status_code=400, detail="Quiz has no questions")
 
@@ -3312,8 +3862,16 @@ async def submit_quiz_attempt(
     submitted_at = _utcnow()
     started_at = attempt.get("started_at")
     duration_minutes = 0.0
+    parsed_started_at: Optional[datetime] = None
     if isinstance(started_at, datetime):
-        duration_minutes = max((submitted_at - started_at).total_seconds() / 60.0, 0.1)
+        parsed_started_at = started_at
+    elif isinstance(started_at, str):
+        try:
+            parsed_started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        except ValueError:
+            parsed_started_at = None
+    if parsed_started_at:
+        duration_minutes = max((submitted_at - parsed_started_at).total_seconds() / 60.0, 0.1)
 
     attempt["status"] = "submitted"
     attempt["submitted_at"] = submitted_at
@@ -3325,7 +3883,7 @@ async def submit_quiz_attempt(
         else "Keep practicing and review the recommended topics before your next attempt."
     )
 
-    return {
+    result_payload = {
         "attempt_id": request.attempt_id,
         "quiz_title": quiz["title"],
         "total_questions": total_questions,
@@ -3343,6 +3901,9 @@ async def submit_quiz_attempt(
         "weaknesses": weak_topics[:5],
         "recommended_topics": weak_topics[:5],
     }
+    await _submit_quiz_attempt_result(user_id, request.attempt_id, result_payload)
+
+    return result_payload
 
 
 @app.get("/users/activity-stats")
@@ -3401,13 +3962,34 @@ def _get_or_init_user_data(user_id: str, storage_dict: Dict[str, Any], default_f
     return storage_dict[user_id]
 
 
-def _generate_sample_recommendations(user_id: str) -> List[Dict[str, Any]]:
+def _generate_sample_recommendations(
+    user_id: str,
+    quiz_results: Optional[List[Dict[str, Any]]] = None,
+    activity: Optional[Dict[str, int]] = None,
+) -> List[Dict[str, Any]]:
+    quiz_results = quiz_results or []
+    activity = activity or {"practice_interviews": 0, "mock_tests": 0}
+
+    weak_topic_counts: Dict[str, int] = {}
+    for result in quiz_results:
+        for topic in result.get("recommended_topics", []) or []:
+            key = str(topic).strip().lower()
+            if not key:
+                continue
+            weak_topic_counts[key] = weak_topic_counts.get(key, 0) + 1
+
+    ranked_topics = sorted(weak_topic_counts.items(), key=lambda item: item[1], reverse=True)
+    top_topic = ranked_topics[0][0] if ranked_topics else "dynamic programming"
+    second_topic = ranked_topics[1][0] if len(ranked_topics) > 1 else "system design"
+    interview_gap = max(0, 5 - _safe_int(activity.get("practice_interviews")))
+    test_gap = max(0, 6 - _safe_int(activity.get("mock_tests")))
+
     sample_recommendations = [
         {
             "id": 1,
             "user_id": user_id,
-            "title": "Master Dynamic Programming",
-            "description": "Focus on dynamic programming patterns to improve problem-solving skills",
+            "title": f"Improve {top_topic.title()} Accuracy",
+            "description": f"Focus on {top_topic} patterns to lift your weak-topic performance.",
             "category": "skill",
             "priority": "high",
             "source": "ai_analysis",
@@ -3422,8 +4004,8 @@ def _generate_sample_recommendations(user_id: str) -> List[Dict[str, Any]]:
         {
             "id": 2,
             "user_id": user_id,
-            "title": "System Design Fundamentals",
-            "description": "Learn scalable system design concepts for senior-level interviews",
+            "title": f"Strengthen {second_topic.title()} Fundamentals",
+            "description": f"Build depth in {second_topic} with structured practice.",
             "category": "course",
             "priority": "medium",
             "source": "ai_analysis",
@@ -3438,8 +4020,8 @@ def _generate_sample_recommendations(user_id: str) -> List[Dict[str, Any]]:
         {
             "id": 3,
             "user_id": user_id,
-            "title": "Mock Interview Practice",
-            "description": "Practice behavioral and technical interviews with AI feedback",
+            "title": "Execution Sprint Plan",
+            "description": f"Complete {interview_gap or 1} interviews and {test_gap or 1} tests this cycle.",
             "category": "practice",
             "priority": "high",
             "source": "ai_analysis",
@@ -3473,8 +4055,9 @@ async def _simulate_ai_generation(user_id: str):
         }, user_id)
         await asyncio.sleep(2)  # Simulate processing time
     
-    # Generate recommendations
-    recommendations = _generate_sample_recommendations(user_id)
+    quiz_results = await _fetch_quiz_attempt_results(user_id, limit=25)
+    activity = await _get_user_activity_stats(user_id)
+    recommendations = _generate_sample_recommendations(user_id, quiz_results, activity)
     USER_RECOMMENDATIONS[user_id] = recommendations
     
     await manager.send_personal_message({
@@ -3508,6 +4091,11 @@ async def get_recommendations(
 ) -> List[Dict[str, Any]]:
     user_id = current_user["id"]
     user_recs = _get_or_init_user_data(user_id, USER_RECOMMENDATIONS, list)
+    if not user_recs:
+        quiz_results = await _fetch_quiz_attempt_results(user_id, limit=25)
+        activity = await _get_user_activity_stats(user_id)
+        user_recs = _generate_sample_recommendations(user_id, quiz_results, activity)
+        USER_RECOMMENDATIONS[user_id] = user_recs
     
     # Filter by status and priority if provided
     filtered_recs = user_recs
@@ -3558,20 +4146,32 @@ async def update_recommendation_status(
 @app.get("/progress/stats")
 async def get_progress_stats(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
     user_id = current_user["id"]
-    
-    # Generate sample stats if not exists
-    if user_id not in USER_PROGRESS_STATS:
-        USER_PROGRESS_STATS[user_id] = {
-            "total_problems_solved": random.randint(50, 200),
-            "total_tests_taken": random.randint(10, 50),
-            "total_interviews": random.randint(5, 25),
-            "current_streak": random.randint(0, 15),
-            "longest_streak": random.randint(5, 30),
-            "total_time_spent_hours": random.randint(50, 500),
-            "achievements_earned": random.randint(3, 15),
-            "avg_test_score": round(random.uniform(60.0, 95.0), 1),
-        }
-    
+    quiz_results = await _fetch_quiz_attempt_results(user_id, limit=120)
+    activity = await _get_user_activity_stats(user_id)
+
+    total_tests = len(quiz_results)
+    avg_test_score = 0.0
+    if total_tests:
+        avg_test_score = round(
+            sum(float(result.get("percentage", 0.0)) for result in quiz_results) / total_tests,
+            1,
+        )
+
+    total_problems = sum(_safe_int(result.get("total_questions")) for result in quiz_results)
+    total_minutes = sum(float(result.get("time_taken_minutes", 0.0)) for result in quiz_results)
+    current_streak = min(total_tests, 14)
+    longest_streak = max(current_streak, min(total_tests + _safe_int(activity.get("practice_interviews")), 30))
+
+    USER_PROGRESS_STATS[user_id] = {
+        "total_problems_solved": total_problems,
+        "total_tests_taken": total_tests,
+        "total_interviews": _safe_int(activity.get("practice_interviews")),
+        "current_streak": current_streak,
+        "longest_streak": longest_streak,
+        "total_time_spent_hours": round(total_minutes / 60.0, 2),
+        "achievements_earned": _safe_int(activity.get("practice_interviews")) + (1 if avg_test_score >= 70 else 0),
+        "avg_test_score": avg_test_score,
+    }
     return USER_PROGRESS_STATS[user_id]
 
 
@@ -3668,4 +4268,95 @@ async def get_dashboard_overview(current_user: Dict[str, Any] = Depends(get_curr
         "certifications": certificates,
         "recommendations": recommendations[:3],  
         "progress_stats": progress_stats,
+    }
+
+
+@app.get("/learning/roadmap")
+async def get_learning_roadmap(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    existing = await _fetch_latest_learning_roadmap(user_id)
+    if existing:
+        return existing
+
+    quiz_results = await _fetch_quiz_attempt_results(user_id, limit=30)
+    activity = await _get_user_activity_stats(user_id)
+    roadmap = _build_user_learning_roadmap(user_id, quiz_results, activity)
+    await _persist_learning_roadmap(user_id, roadmap)
+    return roadmap
+
+
+@app.post("/learning/roadmap/generate")
+async def regenerate_learning_roadmap(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    quiz_results = await _fetch_quiz_attempt_results(user_id, limit=30)
+    activity = await _get_user_activity_stats(user_id)
+    roadmap = _build_user_learning_roadmap(user_id, quiz_results, activity)
+    await _persist_learning_roadmap(user_id, roadmap)
+    return roadmap
+
+
+@app.get("/notifications/reminders")
+async def get_user_reminders(current_user: Dict[str, Any] = Depends(get_current_user)) -> List[Dict[str, Any]]:
+    user_id = current_user["id"]
+    activity = await _get_user_activity_stats(user_id)
+    await _upsert_default_reminders(user_id, _build_default_reminders(activity))
+    reminders = await _fetch_user_reminders(user_id, status="pending")
+    return reminders
+
+
+@app.put("/notifications/reminders/{reminder_id}/status")
+async def update_reminder_status(
+    reminder_id: int,
+    status: str = Query(..., regex="^(pending|done|dismissed)$"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, str]:
+    user_id = current_user["id"]
+    client = get_supabase_client()
+
+    def _update() -> None:
+        (
+            client.table(USER_REMINDERS_TABLE)
+            .update({"status": status, "updated_at": _current_timestamp()})
+            .eq("id", reminder_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+
+    await run_in_threadpool(_update)
+    return {"message": f"Reminder {reminder_id} updated to {status}"}
+
+
+@app.get("/analytics/readiness")
+async def get_readiness_analytics(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    user_id = current_user["id"]
+    stats = await get_progress_stats(current_user)
+    activity = await _get_user_activity_stats(user_id)
+    quiz_results = await _fetch_quiz_attempt_results(user_id, limit=30)
+
+    weak_topic_counts: Dict[str, int] = {}
+    for result in quiz_results:
+        for topic in result.get("recommended_topics", []) or []:
+            key = str(topic).strip().lower()
+            if key:
+                weak_topic_counts[key] = weak_topic_counts.get(key, 0) + 1
+    weak_topics = [name for name, _ in sorted(weak_topic_counts.items(), key=lambda item: item[1], reverse=True)[:5]]
+
+    readiness_score = int(
+        min(
+            100,
+            max(
+                20,
+                stats.get("avg_test_score", 0) * 0.55
+                + min(_safe_int(activity.get("practice_interviews")), 10) * 3
+                + min(_safe_int(activity.get("mock_tests")), 12) * 2,
+            ),
+        )
+    )
+
+    return {
+        "readiness_score": readiness_score,
+        "avg_test_score": stats.get("avg_test_score", 0),
+        "practice_interviews": _safe_int(activity.get("practice_interviews")),
+        "mock_tests": _safe_int(activity.get("mock_tests")),
+        "weak_topics": weak_topics,
     }
