@@ -23,6 +23,8 @@ import {
   type LeetCodeProfile,
   type GitHubProfile,
   type CodeChefProfile,
+  type ReadinessAnalytics,
+  type UserActivityStats,
 } from "@/lib/api"
 import { normalizeGithubUsername } from "@/lib/utils"
 
@@ -95,6 +97,8 @@ export default function ProgressPage() {
   const [profileLoading, setProfileLoading] = useState(false)
   const [profileError, setProfileError] = useState<string | null>(null)
   const [profilesLastSynced, setProfilesLastSynced] = useState<string | null>(null)
+  const [readiness, setReadiness] = useState<ReadinessAnalytics | null>(null)
+  const [activityStats, setActivityStats] = useState<UserActivityStats | null>(null)
 
   // refetch whenever timeRange changes (user picks 7/30/90 days)
   useEffect(() => {
@@ -106,14 +110,18 @@ export default function ProgressPage() {
     setLoading(true)
     setError(null)
     try {
-      const [statsData, historyData, achievementsData] = await Promise.all([
+      const [statsData, historyData, achievementsData, readinessData, activityData] = await Promise.all([
         learningAPI.getProgressStats(),
         learningAPI.getProgressHistory(timeRange),
-        learningAPI.getAchievements()
+        learningAPI.getAchievements(),
+        learningAPI.getReadinessAnalytics(),
+        learningAPI.getActivityStats(),
       ])
       setStats(statsData)
       setHistory(historyData)
       setAchievements(achievementsData)
+      setReadiness(readinessData)
+      setActivityStats(activityData)
     } catch (err: any) {
       setError(formatErrorMessage(err))
     } finally {
@@ -259,7 +267,7 @@ export default function ProgressPage() {
           ) : stats ? (
             <>
               {/* Stats Cards */}
-              <div className="grid md:grid-cols-4 gap-6">
+              <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-6">
                 <Card className="p-6 space-y-2">
                   <div className="flex items-center justify-between">
                     <Target className="h-8 w-8 text-blue-600" />
@@ -291,6 +299,30 @@ export default function ProgressPage() {
                     <span className="text-3xl font-bold">{stats.achievements_earned}</span>
                   </div>
                   <p className="text-sm text-muted-foreground">Achievements</p>
+                </Card>
+
+                <Card className="p-6 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Brain className="h-8 w-8 text-purple-600" />
+                    <span className="text-3xl font-bold">{readiness?.readiness_score ?? 0}</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">Readiness Score</p>
+                </Card>
+
+                <Card className="p-6 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <BookOpen className="h-8 w-8 text-indigo-600" />
+                    <span className="text-3xl font-bold">{activityStats?.mock_tests ?? 0}</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">Persistent Mock Tests</p>
+                </Card>
+
+                <Card className="p-6 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Award className="h-8 w-8 text-emerald-600" />
+                    <span className="text-3xl font-bold">{activityStats?.practice_interviews ?? 0}</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">Persistent Interviews</p>
                 </Card>
               </div>
 
