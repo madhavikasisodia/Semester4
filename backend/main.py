@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from supabase import Client, create_client
 from dotenv import load_dotenv
+import pdfplumber
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -287,6 +288,29 @@ class QuizSubmissionAnswer(BaseModel):
 class QuizAttemptSubmitRequest(BaseModel):
     attempt_id: int
     answers: List[QuizSubmissionAnswer] = Field(default_factory=list)
+
+
+class SkillMatch(BaseModel):
+    skill: str
+    found_in_resume: bool
+    importance: str = "medium"  # low, medium, high
+
+
+class ResumeAnalysisResult(BaseModel):
+    resume_id: int
+    filename: str
+    job_preference: Optional[str] = None
+    overall_score: float
+    match_percentage: float
+    summary: str
+    extracted_text_preview: str
+    extracted_skills: List[str]
+    matched_skills: List[SkillMatch]
+    missing_skills: List[SkillMatch]
+    experience_years: Optional[int] = None
+    recommendations: List[str]
+    strengths: List[str]
+    analyzed_at: str
 
 
 def _parse_origins(raw_origins: Optional[str]) -> List[str]:
@@ -3281,47 +3305,332 @@ async def run_agent(request: AgentRunRequest, current_user: Dict[str, Any] = Dep
 
 # ----------------------- Resume & Certification APIs -----------------------
 
+# JOB PREFERENCE SKILL MAPPINGS
+JOB_SKILLS_MAPPING: Dict[str, Dict[str, List[str]]] = {
+    "backend": {
+        "high": ["python", "java", "nodejs", "golang", "rust", "sql", "rest api", "microservices", "docker", "kubernetes"],
+        "medium": ["linux", "git", "agile", "junit", "pytest", "fastapi", "spring", "django", "express", "design patterns"],
+        "low": ["frontend", "css", "html", "react", "vue"],
+    },
+    "frontend": {
+        "high": ["javascript", "react", "html", "css", "typescript", "responsive design", "ui/ux", "web development", "npm", "webpack"],
+        "medium": ["redux", "vue", "angular", "nextjs", "tailwind", "sass", "design systems", "accessibility", "api integration"],
+        "low": ["backend", "sql", "docker", "devops"],
+    },
+    "fullstack": {
+        "high": ["javascript", "react", "nodejs", "sql", "html", "css", "typescript", "rest api", "database", "web development"],
+        "medium": ["python", "java", "docker", "git", "agile", "design patterns", "nextjs", "express", "mongodb"],
+        "low": ["devops", "kubernetes", "cloud architecture"],
+    },
+    "devops": {
+        "high": ["docker", "kubernetes", "ci/cd", "jenkins", "linux", "terraform", "ansible", "aws", "azure", "gcp"],
+        "medium": ["python", "bash", "git", "monitoring", "prometheus", "grafana", "infrastructure", "automation"],
+        "low": ["java", "frontend", "ui/ux"],
+    },
+    "data science": {
+        "high": ["python", "machine learning", "data analysis", "pandas", "numpy", "scikit-learn", "tensorflow", "sql", "statistics"],
+        "medium": ["deep learning", "nlp", "computer vision", "jupyter", "matplotlib", "visualization", "spark", "hadoop"],
+        "low": ["frontend", "backend", "devops"],
+    },
+    "cloud": {
+        "high": ["aws", "azure", "gcp", "cloud architecture", "terraform", "docker", "kubernetes", "infrastructure", "networking"],
+        "medium": ["python", "automation", "monitoring", "security", "ci/cd", "databases"],
+        "low": ["frontend", "ui/ux"],
+    },
+}
+
+
+async def _extract_text_from_pdf(content: bytes) -> str:
+    """Extract text from PDF file content."""
+    try:
+        text_parts: List[str] = []
+        
+        def _extract() -> str:
+            import io
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                for page in pdf.pages[:10]:  # Limit to first 10 pages for performance
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+            return "\n".join(text_parts)
+        
+        extracted = await run_in_threadpool(_extract)
+        return extracted
+    except Exception as exc:
+        logger.warning("PDF text extraction failed: %s", exc)
+        return ""
+
+
+def _extract_skills_from_text(text: str) -> List[str]:
+    """Extract technical skills from resume text."""
+    text_lower = text.lower()
+    
+    all_skills = {
+        # Programming Languages
+        "python", "java", "javascript", "typescript", "c++", "c#", "go", "golang", "rust", "php", "ruby", "kotlin", "scala",
+        # Frontend
+        "react", "vue", "angular", "nextjs", "html", "css", "sass", "webpack", "npm", "responsive design", "ui/ux", "tailwind", "bootstrap",
+        # Backend
+        "nodejs", "express", "django", "fastapi", "spring", "flask", "rails", "laravel", "rest api", "graphql", "grpc",
+        # Databases
+        "sql", "mongodb", "postgresql", "mysql", "firebase", "dynamodb", "redis", "elasticsearch", "cassandra", "oracle",
+        # Cloud & DevOps
+        "aws", "azure", "gcp", "docker", "kubernetes", "terraform", "ansible", "jenkins", "ci/cd", "github actions",
+        # Data & AI
+        "machine learning", "deep learning", "tensorflow", "pytorch", "scikit-learn", "pandas", "numpy", "data analysis", "nlp", "computer vision",
+        # Tools & Practices
+        "git", "linux", "agile", "scrum", "design patterns", "microservices", "testing", "pytest", "junit", "tdd",
+        # Monitoring & Logging
+        "prometheus", "grafana", "datadog", "elk", "newrelic", "monitoring", "logging",
+        # Other
+        "api design", "system design", "architecture", "performance optimization", "security",
+    }
+    
+    extracted_skills = set()
+    for skill in all_skills:
+        if skill in text_lower:
+            extracted_skills.add(skill)
+    
+    return sorted(list(extracted_skills))
+
+
+def _estimate_experience_years(text: str) -> Optional[int]:
+    """Estimate years of experience from resume text."""
+    import re
+    
+    # Look for patterns like "5 years", "15+ years", etc.
+    patterns = [
+        r'(\d+)\s*\+?\s*years?\s+of\s+experience',
+        r'(\d+)\s*\+?\s*years?\s+in',
+        r'experience:\s*(\d+)\s*\+?\s*years?',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text.lower())
+        if match:
+            try:
+                return int(match.group(1))
+            except (ValueError, AttributeError):
+                pass
+    
+    return None
+
+
+def _calculate_resume_score(
+    extracted_skills: List[str],
+    job_preference: Optional[str],
+    experience_years: Optional[int],
+) -> Tuple[float, List[SkillMatch], List[SkillMatch]]:
+    """Calculate resume score based on skills and job preference."""
+    
+    base_score = 50.0  # Start with 50% base
+    matched_skills_list: List[SkillMatch] = []
+    missing_skills_list: List[SkillMatch] = []
+    
+    if not job_preference or job_preference.lower() not in JOB_SKILLS_MAPPING:
+        # No job preference specified
+        skill_bonus = min(len(extracted_skills) * 2, 30)
+        base_score += skill_bonus
+        return base_score, matched_skills_list, missing_skills_list
+    
+    job_mapping = JOB_SKILLS_MAPPING[job_preference.lower()]
+    all_required_skills = job_mapping.get("high", []) + job_mapping.get("medium", [])
+    
+    extracted_skills_lower = {skill.lower() for skill in extracted_skills}
+    
+    # Score matched skills
+    for skill in job_mapping.get("high", []):
+        if skill in extracted_skills_lower:
+            matched_skills_list.append(SkillMatch(skill=skill, found_in_resume=True, importance="high"))
+            base_score += 3
+        else:
+            missing_skills_list.append(SkillMatch(skill=skill, found_in_resume=False, importance="high"))
+    
+    for skill in job_mapping.get("medium", []):
+        if skill in extracted_skills_lower:
+            matched_skills_list.append(SkillMatch(skill=skill, found_in_resume=True, importance="medium"))
+            base_score += 1.5
+        else:
+            missing_skills_list.append(SkillMatch(skill=skill, found_in_resume=False, importance="medium"))
+    
+    # Experience bonus
+    if experience_years and experience_years >= 3:
+        base_score += min((experience_years - 3) * 2, 15)
+    
+    # Cap score at 100
+    final_score = min(base_score, 100.0)
+    
+    return round(final_score, 2), matched_skills_list, missing_skills_list
+
+
+def _generate_resume_recommendations(
+    matched_skills: List[SkillMatch],
+    missing_skills: List[SkillMatch],
+    extracted_skills: List[str],
+    job_preference: Optional[str],
+) -> Tuple[List[str], List[str]]:
+    """Generate recommendations and strengths for resume."""
+    
+    recommendations: List[str] = []
+    strengths: List[str] = []
+    
+    # Strengths
+    if matched_skills:
+        high_importance = [s for s in matched_skills if s.importance == "high"]
+        if high_importance:
+            strengths.append(f"Strong alignment with {job_preference} role: {', '.join([s.skill.title() for s in high_importance[:3]])}")
+    
+    if len(extracted_skills) >= 8:
+        strengths.append(f"Well-rounded skill set with {len(extracted_skills)} technical skills")
+    
+    if extracted_skills:
+        strengths.append(f"Expertise in {extracted_skills[0].title()} and related technologies")
+    
+    # Recommendations
+    high_priority_missing = [s for s in missing_skills if s.importance == "high"][:3]
+    if high_priority_missing:
+        skills_str = ", ".join([s.skill.title() for s in high_priority_missing])
+        recommendations.append(f"Consider highlighting experience with: {skills_str}")
+    
+    if len(extracted_skills) < 5:
+        recommendations.append("Add more specific technical skills and tools used in your projects")
+    
+    recommendations.append("Include quantifiable achievements (e.g., 'improved performance by 40%')")
+    recommendations.append("Add links to GitHub or portfolio projects demonstrating your skills")
+    recommendations.append("Highlight leadership, problem-solving, or cross-functional collaboration examples")
+    recommendations.append("Include metrics and business impact of your work where possible")
+    
+    return strengths, recommendations
+
 
 @app.post("/resume/upload")
 async def upload_resume(
     file: UploadFile = File(...),
+    job_preference: Optional[str] = Form(None),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    _ = current_user
+    """Upload a resume PDF and extract text."""
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    
     content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="File is empty")
+    
+    # Extract text from PDF
+    extracted_text = await _extract_text_from_pdf(content)
+    if not extracted_text.strip():
+        raise HTTPException(status_code=400, detail="Could not extract text from PDF. Ensure it's a valid PDF.")
+    
     resume_id = next(RESUME_ID_COUNTER)
+    
+    # Extract skills and experience
+    extracted_skills = _extract_skills_from_text(extracted_text)
+    experience_years = _estimate_experience_years(extracted_text)
+    
+    # Calculate score
+    score, matched_skills, missing_skills = _calculate_resume_score(
+        extracted_skills, job_preference, experience_years
+    )
+    
+    # Generate recommendations
+    strengths, recommendations = _generate_resume_recommendations(
+        matched_skills, missing_skills, extracted_skills, job_preference
+    )
+    
+    # Calculate match percentage
+    match_percentage = score
+    
     entry = {
         "id": resume_id,
         "filename": file.filename,
         "upload_date": _current_timestamp(),
         "size_kb": round(len(content) / 1024, 2),
+        "extracted_text": extracted_text,
+        "job_preference": job_preference,
+        "extracted_skills": extracted_skills,
+        "experience_years": experience_years,
+        "overall_score": score,
+        "match_percentage": match_percentage,
+        "matched_skills": [s.dict() for s in matched_skills],
+        "missing_skills": [s.dict() for s in missing_skills],
+        "strengths": strengths,
+        "recommendations": recommendations,
+        "analysis": None,
     }
     RESUMES.append(entry)
-    return {**entry, "message": "Resume uploaded successfully"}
+    
+    return {
+        "id": resume_id,
+        "filename": file.filename,
+        "message": "Resume uploaded successfully",
+        "extracted_skills": extracted_skills,
+        "experience_years": experience_years,
+        "overall_score": score,
+        "match_percentage": match_percentage,
+    }
 
 
 @app.post("/resume/{resume_id}/analyze")
 async def analyze_resume(
     resume_id: int,
+    job_preference: Optional[str] = Query(None),
     current_user: Dict[str, Any] = Depends(get_current_user),
-) -> Dict[str, Any]:
+) -> ResumeAnalysisResult:
+    """Analyze an uploaded resume based on job preference."""
     _ = current_user
     resume = next((item for item in RESUMES if item["id"] == resume_id), None)
     if resume is None:
         raise HTTPException(status_code=404, detail="Resume not found")
-    summary = {
-        "id": resume_id,
-        "filename": resume["filename"],
-        "message": "Resume analyzed successfully",
-        "keywords_detected": ["Python", "System Design", "Leadership"],
-        "score": 82,
-        "recommendations": [
-            "Add quantifiable metrics to recent roles",
-            "Highlight impact of cross-team projects",
-        ],
-    }
-    resume["analysis"] = summary
-    return summary
+    
+    # Use provided job_preference or resume's job_preference
+    final_job_preference = job_preference or resume.get("job_preference")
+    
+    # Extract text if not already extracted
+    extracted_text = resume.get("extracted_text", "")
+    extracted_skills = resume.get("extracted_skills", [])
+    
+    if not extracted_skills:
+        extracted_skills = _extract_skills_from_text(extracted_text)
+    
+    experience_years = resume.get("experience_years") or _estimate_experience_years(extracted_text)
+    
+    # Recalculate score if job preference changed
+    if final_job_preference != resume.get("job_preference"):
+        score, matched_skills, missing_skills = _calculate_resume_score(
+            extracted_skills, final_job_preference, experience_years
+        )
+    else:
+        score = resume.get("overall_score", 50)
+        matched_skills = [SkillMatch(**s) if isinstance(s, dict) else s for s in resume.get("matched_skills", [])]
+        missing_skills = [SkillMatch(**s) if isinstance(s, dict) else s for s in resume.get("missing_skills", [])]
+    
+    strengths, recommendations = _generate_resume_recommendations(
+        matched_skills, missing_skills, extracted_skills, final_job_preference
+    )
+    
+    # Create preview of extracted text (first 500 chars)
+    text_preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+    
+    analysis_result = ResumeAnalysisResult(
+        resume_id=resume_id,
+        filename=resume["filename"],
+        job_preference=final_job_preference,
+        overall_score=score,
+        match_percentage=score,
+        summary=f"Resume analysis for {final_job_preference or 'general'} role. Overall match: {score}%",
+        extracted_text_preview=text_preview,
+        extracted_skills=extracted_skills,
+        matched_skills=matched_skills,
+        missing_skills=missing_skills,
+        experience_years=experience_years,
+        recommendations=recommendations,
+        strengths=strengths,
+        analyzed_at=_current_timestamp(),
+    )
+    
+    resume["analysis"] = analysis_result.dict()
+    return analysis_result
 
 
 @app.get("/resume/list")

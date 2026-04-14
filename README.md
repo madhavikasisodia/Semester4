@@ -8,6 +8,7 @@ Comprehensive learning + interview preparation platform built with a Next.js fro
 - **Learning intelligence APIs** – FastAPI backend tracks recommendations, progress history, achievements, test scores, and certification uploads.
 - **Profile integrations** – Pulls GitHub and LeetCode stats for each user to merge into a combined profile card.
 - **Interview simulator** – Persona-based mock interview sessions with question rotation, scoring, speech analysis, and reporting endpoints.
+- **Resume analyzer** – PDF-based resume upload with intelligent text extraction, skill detection, and job-preference matching. Scores resumes against target roles with personalized recommendations.
 - **Document pipeline** – Upload/analysis endpoints for resumes and certifications (PDF or image formats).
 - **Automation agents** – Built-in `progress-coach` and `career-strategist` agents that synthesize recent telemetry and return actionable briefings via `/agents` endpoints.
 
@@ -113,14 +114,99 @@ Set `NEXT_PUBLIC_API_BASE` inside `.env.local` (or hosting provider variables) t
 | `GET /profile/{leetcode}/{github}` | Combined profile fetch. |
 | `GET /dashboard/overview` | Bundled resumes, test scores, certifications, recommendations, and progress stats. |
 | `GET /progress/stats`, `/progress/history`, `/achievements` | Learning telemetry feeds. |
-| `POST /resume/upload`, `POST /resume/{id}/analyze` | Resume ingestion + AI analysis stub. |
+| `POST /resume/upload` | Upload PDF resume with job preference. Extracts text, detects skills, and computes initial match score. |
+| `POST /resume/{id}/analyze` | Detailed resume analysis based on job preference. Returns: matched skills, missing skills, strengths, recommendations, experience years. |
+| `GET /resume/list` | Lists all uploaded resumes with scores and metadata. |
 | `POST /certifications` | Certification upload (multipart). |
 | `POST /interview/start`, `/interview/{session}/answer`, `/interview/{session}/report` | Persona-driven mock interview workflow. |
 | `GET /agents` | Lists available automation agents (`progress-coach`, `career-strategist`). |
 | `POST /agents/run` | Executes an agent with optional inputs (`days`, `company`, etc.) and stores the run digest. |
 | `GET /agents/runs`, `/agents/runs/{run_id}` | Inspect historical agent runs held in-memory. |
 
-Refer to `frontend/lib/api.ts` for the typed client covering all endpoints.
+## Resume Analyzer
+
+The resume analyzer feature intelligently processes PDF resumes and provides data-driven feedback aligned with user job preferences.
+
+### Supported Job Preferences
+
+- **Backend**: Python, Java, Node.js, SQL, REST APIs, Microservices, Docker, Kubernetes
+- **Frontend**: JavaScript, React, HTML, CSS, TypeScript, Responsive Design, UI/UX
+- **Fullstack**: JavaScript, React, Node.js, SQL, HTML, CSS, TypeScript, REST APIs
+- **DevOps**: Docker, Kubernetes, CI/CD, Linux, Terraform, AWS, Azure
+- **Data Science**: Python, Machine Learning, Data Analysis, Pandas, TensorFlow
+- **Cloud**: AWS, Azure, GCP, Terraform, Infrastructure, Networking
+
+### Analysis Features
+
+1. **Skill Extraction** – Automatically detects 100+ technical skills from resume text
+2. **Job Matching** – Scores resume against target role with weighted high/medium/low priority skills
+3. **Experience Estimation** – Parses years of professional experience from resume content
+4. **Strengths Identification** – Highlights strong alignments with job preferences
+5. **Skills Gap Analysis** – Lists missing high-priority skills for the target role
+6. **Personalized Recommendations** – Actionable suggestions to improve resume match score
+
+### Usage
+
+1. Navigate to `/resume` page
+2. Select target job preference
+3. Upload PDF resume
+4. System automatically extracts text and computes match score
+5. Review detailed analysis with actionable feedback
+6. Enhancements are tracked across uploads for progress monitoring
+
+### Scoring System
+
+- **Base score**: 50%
+- **Skill matching**: 
+  - High-priority skills: +3% each
+  - Medium-priority skills: +1.5% each
+- **Experience bonus**: +2% per year (for 3+ years)
+- **Final score**: Capped at 100%
+
+### Resume Analytics Response Example
+
+```json
+{
+  "resume_id": 1,
+  "filename": "resume.pdf",
+  "job_preference": "backend",
+  "overall_score": 82.5,
+  "match_percentage": 82.5,
+  "summary": "Resume analysis for backend role. Overall match: 82.5%",
+  "extracted_text_preview": "John Doe... (first 500 characters)",
+  "extracted_skills": ["Python", "Java", "SQL", "REST API", "Docker", "Kubernetes"],
+  "experience_years": 5,
+  "matched_skills": [
+    {"skill": "Python", "found_in_resume": true, "importance": "high"},
+    {"skill": "SQL", "found_in_resume": true, "importance": "high"},
+    {"skill": "REST API", "found_in_resume": true, "importance": "high"}
+  ],
+  "missing_skills": [
+    {"skill": "Microservices", "found_in_resume": false, "importance": "high"},
+    {"skill": "Message Queues", "found_in_resume": false, "importance": "medium"}
+  ],
+  "strengths": [
+    "Strong alignment with backend role: Python, SQL, REST API",
+    "Well-rounded skill set with 6 technical skills"
+  ],
+  "recommendations": [
+    "Consider highlighting experience with: Microservices",
+    "Add more specific technical skills and tools used in your projects",
+    "Include quantifiable achievements (e.g., 'improved performance by 40%')",
+    "Add links to GitHub or portfolio projects demonstrating your skills",
+    "Highlight leadership, problem-solving, or cross-functional collaboration examples",
+    "Include metrics and business impact of your work where possible"
+  ],
+  "analyzed_at": "2026-04-14T10:30:00Z"
+}
+```
+
+### Technical Stack
+
+- **PDF Processing**: pdfplumber (reliable text extraction from PDFs)
+- **Skill Detection**: Regex-based pattern matching against 100+ technical keywords
+- **Text Extraction**: Async processing with thread pooling for performance
+- **Scoring Algorithm**: Weighted skill matching with experience bonus
 
 ## Development Notes
 
