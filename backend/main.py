@@ -4,7 +4,7 @@ import os
 import random
 import re
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from itertools import count
 from pathlib import Path
@@ -410,7 +410,7 @@ async def _persist_user_profile(client: Client, user_id: str, email: str, metada
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _isoformat(value: datetime, *, timespec: str = "seconds") -> str:
@@ -3319,7 +3319,7 @@ async def get_progress_history(
     # Generate sample history if not exists
     if user_id not in USER_PROGRESS_HISTORY:
         history = []
-        base_date = datetime.now(UTC) - timedelta(days=days)
+        base_date = datetime.now(timezone.utc) - timedelta(days=days)
         
         for i in range(days):
             date = base_date + timedelta(days=i)
