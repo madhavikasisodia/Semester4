@@ -1,13 +1,26 @@
 "use client"
 
 import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { useAuthStore } from "@/lib/store"
-import { LogOut, Menu, X } from "lucide-react"
+import {
+  BookOpen,
+  BrainCircuit,
+  FileText,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Sparkles,
+  Target,
+  Trophy,
+  X,
+} from "lucide-react"
 import { useState, useEffect } from "react"
 import { ThemeToggle } from "@/components/theme-toggle"
 
 export function Navbar() {
+  const pathname = usePathname()
   const { user, logout } = useAuthStore()
   const [menuOpen, setMenuOpen] = useState(false)
   const [mounted, setMounted] = useState(false)
@@ -16,107 +29,59 @@ export function Navbar() {
     setMounted(true)
   }, [])
 
+  useEffect(() => {
+    document.body.style.overflow = menuOpen ? "hidden" : ""
+    return () => {
+      document.body.style.overflow = ""
+    }
+  }, [menuOpen])
+
   const navLinks = [
-    { href: "/dashboard", label: "Dashboard" },
-    { href: "/recommendations", label: "Recommendations" },
-    { href: "/progress", label: "Progress" },
-    { href: "/resume", label: "Resume" },
-    { href: "/interview", label: "Interview" },
-    { href: "/tests", label: "Tests" },
+    { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/learning", label: "Learning", icon: BookOpen },
+    { href: "/recommendations", label: "Recommendations", icon: Sparkles },
+    { href: "/progress", label: "Progress", icon: Target },
+    { href: "/resume", label: "Resume", icon: FileText },
+    { href: "/interview", label: "Interview", icon: BrainCircuit },
+    { href: "/tests", label: "Tests", icon: Trophy },
   ]
 
-  return (
-    <nav className="fixed top-0 w-full z-50 glass-dark border-b">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+  const sidebarContent = (
+    <>
+      <div className="border-b border-border px-5 py-5">
         <Link href="/" className="flex items-center gap-2 group">
-          <span className="font-bold text-lg gradient-text">EduNerve</span>
+          <span className="font-bold text-lg gradient-text tracking-wide">EduNerve</span>
         </Link>
+      </div>
 
-        {mounted && user ? (
-          <>
-            {/* Desktop Navigation */}
-            <div className="hidden md:flex items-center gap-6">
-              {navLinks.map((link) => (
+      {mounted && user ? (
+        <>
+          <div className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+            {navLinks.map((link) => {
+              const isActive = pathname === link.href || pathname.startsWith(`${link.href}/`)
+              const Icon = link.icon
+
+              return (
                 <Link
                   key={link.href}
                   href={link.href}
-                  className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={() => setMenuOpen(false)}
+                  className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
+                    isActive
+                      ? "bg-primary/15 text-foreground border border-primary/30"
+                      : "text-muted-foreground hover:text-foreground hover:bg-foreground/5"
+                  }`}
                 >
-                  {link.label}
+                  <Icon className="w-4 h-4" />
+                  <span>{link.label}</span>
                 </Link>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-4">
-              <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground">
-                <span>Welcome, {user.name}</span>
-              </div>
-              
-              {/* Theme Toggle */}
-              <ThemeToggle />
-              
-              {/* Mobile Menu Button */}
-              <button
-                className="md:hidden p-2"
-                onClick={() => setMenuOpen(!menuOpen)}
-              >
-                {menuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-              </button>
-
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  logout()
-                  window.location.href = "/"
-                }}
-                className="hidden md:flex items-center gap-2"
-              >
-                <LogOut className="w-4 h-4" />
-                <span>Logout</span>
-              </Button>
-            </div>
-          </>
-        ) : mounted ? (
-          <div className="flex items-center gap-3">
-            {/* Theme Toggle */}
-            <ThemeToggle />
-            
-            <Link href="/login">
-              <Button variant="ghost" size="sm">
-                Login
-              </Button>
-            </Link>
-            <Link href="/signup">
-              <Button size="sm" className="bg-gradient-to-r from-primary to-accent hover:opacity-90">
-                Sign Up
-              </Button>
-            </Link>
+              )
+            })}
           </div>
-        ) : (
-          // Fallback for when not mounted yet - prevents hydration mismatch
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-          </div>
-        )}
-      </div>
 
-      {/* Mobile Menu */}
-      {mounted && user && menuOpen && (
-        <div className="md:hidden border-t bg-background">
-          <div className="px-4 py-4 space-y-3">
-            {navLinks.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                className="block py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                onClick={() => setMenuOpen(false)}
-              >
-                {link.label}
-              </Link>
-            ))}
-            <div className="flex items-center gap-2 py-2">
-              <span className="text-sm text-muted-foreground">Theme:</span>
+          <div className="border-t border-border p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground truncate">{user.name}</p>
               <ThemeToggle />
             </div>
             <Button
@@ -132,8 +97,63 @@ export function Navbar() {
               <span>Logout</span>
             </Button>
           </div>
+        </>
+      ) : mounted ? (
+        <div className="flex-1 p-4 flex flex-col gap-3 justify-end">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">Theme</span>
+            <ThemeToggle />
+          </div>
+          <Link href="/login" onClick={() => setMenuOpen(false)}>
+            <Button variant="ghost" size="sm" className="w-full">
+              Login
+            </Button>
+          </Link>
+          <Link href="/signup" onClick={() => setMenuOpen(false)}>
+            <Button size="sm" className="w-full bg-linear-to-r from-primary to-accent hover:opacity-90">
+              Sign Up
+            </Button>
+          </Link>
+        </div>
+      ) : (
+        <div className="flex-1 p-4">
+          <ThemeToggle />
         </div>
       )}
-    </nav>
+    </>
+  )
+
+  return (
+    <>
+      <header className="fixed top-0 inset-x-0 z-50 h-16 glass-dark border-b border-border">
+        <div className="h-full px-4 flex items-center justify-start gap-3">
+          <button
+            aria-label={menuOpen ? "Close navigation" : "Open navigation"}
+            className="p-2 rounded-lg border border-border/60 bg-background/60"
+            onClick={() => setMenuOpen((prev) => !prev)}
+          >
+            {menuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+          <Link href="/" className="font-bold text-base gradient-text tracking-wide">
+            EduNerve
+          </Link>
+        </div>
+      </header>
+
+      {menuOpen && (
+        <div className="fixed inset-0 z-40">
+          <button
+            aria-label="Close navigation overlay"
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setMenuOpen(false)}
+          />
+          <aside className="absolute left-0 top-0 h-full w-72 max-w-[85vw] glass-dark border-r border-border flex flex-col">
+            {sidebarContent}
+          </aside>
+        </div>
+      )}
+
+      <div className="h-16" aria-hidden="true" />
+    </>
   )
 }

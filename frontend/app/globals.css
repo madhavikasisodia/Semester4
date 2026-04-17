@@ -160,7 +160,7 @@
 
   /* Gradient text */
   .gradient-text {
-    @apply bg-gradient-to-r from-primary via-accent to-secondary bg-clip-text text-transparent;
+    @apply bg-linear-to-r from-primary via-accent to-secondary bg-clip-text text-transparent;
   }
 
   /* Glow effect */
