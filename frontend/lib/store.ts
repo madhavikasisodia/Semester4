@@ -52,6 +52,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
   logout: () => {
     if (typeof window !== "undefined") {
       window.localStorage.removeItem("auth_token")
+      window.localStorage.removeItem("token")
+      window.localStorage.removeItem("access_token")
       window.localStorage.removeItem("refresh_token")
     }
     persistUser(null)

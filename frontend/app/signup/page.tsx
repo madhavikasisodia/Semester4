@@ -80,6 +80,8 @@ export default function SignupPage() {
 
       if (data.access_token) {
         localStorage.setItem("auth_token", data.access_token)
+        localStorage.setItem("token", data.access_token)
+        localStorage.setItem("access_token", data.access_token)
       }
       if (data.refresh_token) {
         localStorage.setItem("refresh_token", data.refresh_token)

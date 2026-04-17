@@ -27,7 +27,86 @@ import { useAuthStore } from "@/lib/store"
 import { useRouter } from "next/navigation"
 
 // backend API base, set via NEXT_PUBLIC_API_BASE or fallback to localhost
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE;
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000").replace(/\/$/, "")
+const TOKEN_STORAGE_KEYS = ["auth_token", "token", "access_token"] as const
+
+const getStoredAccessToken = () => {
+  for (const key of TOKEN_STORAGE_KEYS) {
+    const value = localStorage.getItem(key)
+    if (value) {
+      return value
+    }
+  }
+  return null
+}
+
+const persistAccessToken = (token: string) => {
+  TOKEN_STORAGE_KEYS.forEach((key) => localStorage.setItem(key, token))
+}
+
+let refreshPromise: Promise<string | null> | null = null
+
+const refreshAccessToken = async (): Promise<string | null> => {
+  const refreshToken = localStorage.getItem("refresh_token")
+  if (!refreshToken) return null
+
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        })
+
+        if (!response.ok) {
+          return null
+        }
+
+        const data = await response.json()
+        if (data.access_token) {
+          persistAccessToken(data.access_token)
+        }
+        if (data.refresh_token) {
+          localStorage.setItem("refresh_token", data.refresh_token)
+        }
+        return data.access_token ?? null
+      } catch (error) {
+        console.error("Token refresh failed:", error)
+        return null
+      } finally {
+        refreshPromise = null
+      }
+    })()
+  }
+
+  return refreshPromise
+}
+
+const authFetch = async (url: string, init: RequestInit = {}) => {
+  const firstHeaders = new Headers(init.headers || {})
+  const token = getStoredAccessToken()
+  if (token) {
+    firstHeaders.set("Authorization", `Bearer ${token}`)
+  }
+
+  const firstResponse = await fetch(url, { ...init, headers: firstHeaders })
+  if (firstResponse.status !== 401) {
+    return firstResponse
+  }
+
+  const refreshedToken = await refreshAccessToken()
+  if (!refreshedToken) {
+    return firstResponse
+  }
+
+  const retryHeaders = new Headers(init.headers || {})
+  retryHeaders.set("Authorization", `Bearer ${refreshedToken}`)
+
+  return fetch(url, { ...init, headers: retryHeaders })
+}
 
 // quiz metadata returned from server
 interface Quiz {
@@ -131,17 +210,14 @@ export default function TakeTestsPage() {
     }
   }, [currentQuiz, attemptId, timeLeft])
 
-  const getAuthHeader = () => {
-    const token =
-      localStorage.getItem("auth_token") ||
-      localStorage.getItem("token") ||
-      localStorage.getItem("access_token")
-    return { Authorization: `Bearer ${token}` }
+  const getAuthHeader = (): Record<string, string> => {
+    const token = getStoredAccessToken()
+    return token ? { Authorization: `Bearer ${token}` } : {}
   }
 
   const fetchQuizzes = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/quiz/list?limit=50`, {
+      const response = await authFetch(`${API_BASE_URL}/quiz/list?limit=50`, {
         headers: getAuthHeader(),
       })
       if (response.ok) {
@@ -155,7 +231,7 @@ export default function TakeTestsPage() {
 
   const fetchScrapeSources = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/quiz/scrape-sources`, {
+      const response = await authFetch(`${API_BASE_URL}/quiz/scrape-sources`, {
         headers: getAuthHeader(),
       })
       if (response.ok) {
@@ -177,7 +253,7 @@ export default function TakeTestsPage() {
 
     setLoading(true)
     try {
-      const response = await fetch(`${API_BASE_URL}/quiz/generate`, {
+      const response = await authFetch(`${API_BASE_URL}/quiz/generate`, {
         method: "POST",
         headers: {
           ...getAuthHeader(),
@@ -220,12 +296,12 @@ export default function TakeTestsPage() {
   const handleStartQuiz = async (quiz: Quiz) => {
     setLoading(true)
     try {
-      const quizResponse = await fetch(`${API_BASE_URL}/quiz/${quiz.id}`, {
+      const quizResponse = await authFetch(`${API_BASE_URL}/quiz/${quiz.id}`, {
         headers: getAuthHeader(),
       })
       const quizData = await quizResponse.json()
 
-      const attemptResponse = await fetch(`${API_BASE_URL}/quiz/attempt/start`, {
+      const attemptResponse = await authFetch(`${API_BASE_URL}/quiz/attempt/start`, {
         method: "POST",
         headers: {
           ...getAuthHeader(),
@@ -282,7 +358,7 @@ export default function TakeTestsPage() {
         time_taken_seconds: (new Date().getTime() - quizStartTime.getTime()) / 1000,
       }))
 
-      const response = await fetch(`${API_BASE_URL}/quiz/attempt/submit`, {
+      const response = await authFetch(`${API_BASE_URL}/quiz/attempt/submit`, {
         method: "POST",
         headers: {
           ...getAuthHeader(),
