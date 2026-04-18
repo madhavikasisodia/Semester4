@@ -9,16 +9,43 @@ import { useState, useEffect, useRef } from "react"
 import { interviewAPI, type Persona, type InterviewSession, type InterviewReport } from "@/lib/api"
 import { Textarea } from "@/components/ui/textarea"
 
+const getStoredAccessToken = (): string | null => {
+  if (typeof window === "undefined") return null
+  return (
+    localStorage.getItem("auth_token") ||
+    localStorage.getItem("token") ||
+    localStorage.getItem("access_token")
+  )
+}
+
+const isAxiosLikeError = (err: any): err is {
+  message?: string
+  code?: string
+  config?: { url?: string; method?: string }
+  response?: { status?: number; data?: any }
+} => {
+  return !!err && typeof err === "object" && ("response" in err || "config" in err || "code" in err)
+}
+
 // Helper function to format error messages
 const formatErrorMessage = (err: any): string => {
   if (typeof err === 'string') return err
-  
-  console.log("Full error object:", err)
-  console.log("Error response:", err.response)
-  console.log("Error response data:", err.response?.data)
+
+  if (!isAxiosLikeError(err)) {
+    return err?.message || "An unexpected error occurred"
+  }
   
   const status = err.response?.status
   const requestUrl = String(err.config?.url || "")
+
+  if (err.code === "ERR_NETWORK") {
+    return "Cannot reach backend server. Ensure FastAPI is running on http://localhost:8000 and CORS allows frontend origin."
+  }
+
+  if (status === 401) {
+    return "Session expired or not logged in. Please log in again and retry."
+  }
+
   if ((status === 404 || status === 405) && requestUrl.includes("/interview/transcribe")) {
     return "Whisper transcription endpoint is unavailable. Please restart backend server to load the latest routes."
   }
@@ -34,6 +61,14 @@ const formatErrorMessage = (err: any): string => {
   // Check if detail is a string
   if (typeof err.response?.data?.detail === 'string') {
     return err.response.data.detail
+  }
+
+  if (typeof err.response?.data === "string" && err.response.data.trim()) {
+    return err.response.data
+  }
+
+  if (status) {
+    return `Request failed (${status}). Please try again.`
   }
   
   // Fallback to error message or generic message
@@ -89,6 +124,11 @@ export default function InterviewPage() {
       setError("Please enter your name and target role")
       return
     }
+
+    if (!getStoredAccessToken()) {
+      setError("Please log in first to start an interview session.")
+      return
+    }
     
     setLoading(true)
     setError(null)
@@ -122,8 +162,18 @@ export default function InterviewPage() {
       setSelectedPersona(persona)
       setSessionStarted(true)
     } catch (err: any) {
-      console.error("Interview start error:", err)
-      console.error("Error details:", err.response?.data)
+      if (isAxiosLikeError(err)) {
+        console.error("Interview start error", {
+          message: err.message,
+          code: err.code,
+          status: err.response?.status,
+          url: err.config?.url,
+          method: err.config?.method,
+          data: err.response?.data,
+        })
+      } else {
+        console.error("Interview start error:", err)
+      }
       setError(formatErrorMessage(err))
     } finally {
       setLoading(false)
@@ -148,7 +198,12 @@ export default function InterviewPage() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480 },
-        audio: true
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        }
       })
       
       setMediaStream(stream)
@@ -181,9 +236,24 @@ export default function InterviewPage() {
       setError("Please enable camera first")
       return
     }
-    
-    const options = { mimeType: "video/webm;codecs=vp8,opus" }
-    const recorder = new MediaRecorder(mediaStream, options)
+
+    const audioTracks = mediaStream.getAudioTracks()
+    if (audioTracks.length === 0) {
+      setError("Microphone track not found. Please allow microphone access and try again.")
+      return
+    }
+
+    const audioOnlyStream = new MediaStream(audioTracks)
+    const preferredMimeTypes = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+    ]
+    const selectedMimeType =
+      preferredMimeTypes.find((mime) => MediaRecorder.isTypeSupported(mime)) || ""
+    const recorder = selectedMimeType
+      ? new MediaRecorder(audioOnlyStream, { mimeType: selectedMimeType })
+      : new MediaRecorder(audioOnlyStream)
     
     const chunks: Blob[] = []
     
@@ -200,9 +270,15 @@ export default function InterviewPage() {
         return
       }
 
-      const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" })
-      const file = new File([blob], `answer-${Date.now()}.webm`, {
-        type: blob.type || "video/webm",
+      const blobType = recorder.mimeType || "audio/webm"
+      const extension = blobType.includes("ogg") ? "ogg" : "webm"
+      const blob = new Blob(chunks, { type: blobType })
+      if (!blob.size) {
+        setError("Recording captured no audio data. Please allow microphone access and try again.")
+        return
+      }
+      const file = new File([blob], `answer-${Date.now()}.${extension}`, {
+        type: blob.type || "audio/webm",
       })
 
       setIsTranscribing(true)
@@ -211,10 +287,13 @@ export default function InterviewPage() {
         const transcription = await interviewAPI.transcribeAudio(file)
         const transcript = transcription.text?.trim() || ""
         if (!transcript) {
-          setError("Whisper could not detect speech. Please try recording again.")
+          setError(transcription.warning || "Whisper could not detect speech. Please try recording again.")
           return
         }
         setAnswer(transcript)
+        if (transcription.warning) {
+          setError(transcription.warning)
+        }
       } catch (err: any) {
         console.error("Transcription error:", err)
         setError(formatErrorMessage(err))

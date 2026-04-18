@@ -2490,7 +2490,7 @@ def _get_whisper_model() -> Any:
     if WHISPER_MODEL_CACHE is not None:
         return WHISPER_MODEL_CACHE
 
-    model_name = os.getenv("WHISPER_MODEL", "base")
+    model_name = os.getenv("WHISPER_MODEL", "small")
     try:
         from faster_whisper import WhisperModel  # type: ignore
         WHISPER_MODEL_CACHE = {
@@ -2523,17 +2523,75 @@ def _get_whisper_model() -> Any:
 def _transcribe_with_whisper(temp_path: str) -> Tuple[str, str]:
     model_bundle = _get_whisper_model()
     provider = model_bundle.get("provider")
-    model_name = model_bundle.get("name", os.getenv("WHISPER_MODEL", "base"))
+    model_name = model_bundle.get("name", os.getenv("WHISPER_MODEL", "small"))
+    configured_language = (os.getenv("WHISPER_LANGUAGE", "en") or "").strip()
+    whisper_language = configured_language or None
 
     if provider == "faster-whisper":
         model = model_bundle["model"]
-        segments, _ = model.transcribe(temp_path, task="transcribe", language="en")
+        segments, _ = model.transcribe(
+            temp_path,
+            task="transcribe",
+            language=whisper_language,
+            beam_size=5,
+            best_of=5,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            vad_filter=True,
+        )
         text = " ".join(segment.text for segment in segments).strip()
+
+        # Retry without VAD if the first pass filtered out short/quiet speech.
+        if not text:
+            segments, _ = model.transcribe(
+                temp_path,
+                task="transcribe",
+                language=whisper_language,
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                vad_filter=False,
+            )
+            text = " ".join(segment.text for segment in segments).strip()
+
+        # Final fallback: allow language auto-detection when forced language fails.
+        if not text and whisper_language is not None:
+            segments, _ = model.transcribe(
+                temp_path,
+                task="transcribe",
+                language=None,
+                beam_size=5,
+                best_of=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                vad_filter=False,
+            )
+            text = " ".join(segment.text for segment in segments).strip()
         return text, model_name
 
     model = model_bundle["model"]
-    result = model.transcribe(temp_path, task="transcribe", language="en")
+    result = model.transcribe(
+        temp_path,
+        task="transcribe",
+        language=whisper_language,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        fp16=False,
+    )
     text = str(result.get("text", "")).strip()
+
+    if not text:
+        result = model.transcribe(
+            temp_path,
+            task="transcribe",
+            language=None,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            fp16=False,
+        )
+        text = str(result.get("text", "")).strip()
+
     return text, model_name
 
 # WebSocket connection manager
@@ -3760,13 +3818,26 @@ async def transcribe_interview_audio(
 ) -> Dict[str, Any]:
     _ = current_user["id"]
     content_type = (file.content_type or "").lower()
-    if content_type and not (content_type.startswith("audio/") or content_type.startswith("video/")):
-        raise HTTPException(status_code=400, detail="Please upload a valid audio/video recording")
+    # Some browsers upload blobs as application/octet-stream.
+    if content_type and not (
+        content_type.startswith("audio/")
+        or content_type.startswith("video/")
+        or content_type == "application/octet-stream"
+    ):
+        return {
+            "text": "",
+            "model": os.getenv("WHISPER_MODEL", "small"),
+            "warning": f"Unsupported file type: {content_type}",
+        }
 
     suffix = Path(file.filename or "recording.webm").suffix or ".webm"
     payload = await file.read()
     if not payload:
-        raise HTTPException(status_code=400, detail="Uploaded recording is empty")
+        return {
+            "text": "",
+            "model": os.getenv("WHISPER_MODEL", "small"),
+            "warning": "Uploaded recording is empty",
+        }
 
     temp_path = ""
     try:
@@ -3775,12 +3846,12 @@ async def transcribe_interview_audio(
             temp_path = temp_file.name
 
         text, model_name = await run_in_threadpool(_transcribe_with_whisper, temp_path)
-        if not text:
-            raise HTTPException(status_code=400, detail="Could not detect speech in recording")
+        normalized_text = (text or "").strip()
 
         return {
-            "text": text,
+            "text": normalized_text,
             "model": model_name,
+            "warning": None if normalized_text else "Could not detect speech in recording",
         }
     except HTTPException:
         raise

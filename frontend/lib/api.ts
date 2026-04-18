@@ -472,6 +472,7 @@ export interface AnswerResponse {
 export interface WhisperTranscriptionResponse {
   text: string
   model: string
+  warning?: string | null
 }
 
 export interface InterviewReport {
