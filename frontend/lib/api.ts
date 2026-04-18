@@ -469,6 +469,11 @@ export interface AnswerResponse {
   message?: string
 }
 
+export interface WhisperTranscriptionResponse {
+  text: string
+  model: string
+}
+
 export interface InterviewReport {
   session_id: string
   candidate_name: string
@@ -885,15 +890,22 @@ export const interviewAPI = {
     answer: string,
     audioDuration?: number
   ): Promise<AnswerResponse> {
-    const params = new URLSearchParams()
-    params.append("answer", answer)
-    if (audioDuration) {
-      params.append("audio_duration", audioDuration.toString())
-    }
-    
-    const { data } = await api.post(
-      `/interview/${sessionId}/answer?${params.toString()}`
-    )
+    const { data } = await api.post(`/interview/${sessionId}/answer`, {
+      answer,
+      audio_duration: audioDuration,
+    })
+    return data
+  },
+
+  async transcribeAudio(file: File): Promise<WhisperTranscriptionResponse> {
+    const formData = new FormData()
+    formData.append("file", file)
+
+    const { data } = await api.post("/interview/transcribe", formData, {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    })
     return data
   },
 

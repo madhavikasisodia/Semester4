@@ -13,11 +13,12 @@ from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from uuid import uuid4
 import json
 import asyncio
+import tempfile
 import xml.etree.ElementTree as ET
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import Depends, File, FastAPI, Form, HTTPException, Header, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, File, FastAPI, Form, HTTPException, Header, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -258,6 +259,11 @@ class InterviewStartRequest(BaseModel):
     difficulty: str = "medium"
     duration_minutes: int = Field(30, ge=15, le=120)
     company_context: Optional[str] = None
+
+
+class InterviewAnswerRequest(BaseModel):
+    answer: str = Field(..., min_length=1)
+    audio_duration: Optional[float] = Field(None, ge=0)
 
 
 class AgentRunRequest(BaseModel):
@@ -2476,6 +2482,59 @@ INTERVIEW_PERSONAS = [
 
 
 INTERVIEW_SESSIONS: Dict[str, Dict[str, Any]] = {}
+WHISPER_MODEL_CACHE: Any = None
+
+
+def _get_whisper_model() -> Any:
+    global WHISPER_MODEL_CACHE
+    if WHISPER_MODEL_CACHE is not None:
+        return WHISPER_MODEL_CACHE
+
+    model_name = os.getenv("WHISPER_MODEL", "base")
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+        WHISPER_MODEL_CACHE = {
+            "provider": "faster-whisper",
+            "model": WhisperModel(model_name, device="cpu", compute_type="int8"),
+            "name": model_name,
+        }
+        logger.info("Loaded faster-whisper model: %s", model_name)
+        return WHISPER_MODEL_CACHE
+    except ImportError as exc:
+        logger.warning("faster-whisper not available, falling back to openai-whisper", exc_info=True)
+
+    try:
+        import whisper  # type: ignore
+        WHISPER_MODEL_CACHE = {
+            "provider": "openai-whisper",
+            "model": whisper.load_model(model_name),
+            "name": model_name,
+        }
+        logger.info("Loaded openai-whisper model: %s", model_name)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail="Whisper is not installed. Install dependency: faster-whisper",
+        ) from exc
+
+    return WHISPER_MODEL_CACHE
+
+
+def _transcribe_with_whisper(temp_path: str) -> Tuple[str, str]:
+    model_bundle = _get_whisper_model()
+    provider = model_bundle.get("provider")
+    model_name = model_bundle.get("name", os.getenv("WHISPER_MODEL", "base"))
+
+    if provider == "faster-whisper":
+        model = model_bundle["model"]
+        segments, _ = model.transcribe(temp_path, task="transcribe", language="en")
+        text = " ".join(segment.text for segment in segments).strip()
+        return text, model_name
+
+    model = model_bundle["model"]
+    result = model.transcribe(temp_path, task="transcribe", language="en")
+    text = str(result.get("text", "")).strip()
+    return text, model_name
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -3694,6 +3753,48 @@ async def list_personas() -> Dict[str, Any]:
     return {"personas": INTERVIEW_PERSONAS}
 
 
+@app.post("/interview/transcribe")
+async def transcribe_interview_audio(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user["id"]
+    content_type = (file.content_type or "").lower()
+    if content_type and not (content_type.startswith("audio/") or content_type.startswith("video/")):
+        raise HTTPException(status_code=400, detail="Please upload a valid audio/video recording")
+
+    suffix = Path(file.filename or "recording.webm").suffix or ".webm"
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded recording is empty")
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(payload)
+            temp_path = temp_file.name
+
+        text, model_name = await run_in_threadpool(_transcribe_with_whisper, temp_path)
+        if not text:
+            raise HTTPException(status_code=400, detail="Could not detect speech in recording")
+
+        return {
+            "text": text,
+            "model": model_name,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Whisper transcription failed")
+        raise HTTPException(status_code=500, detail="Whisper transcription failed") from exc
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logger.warning("Failed to delete temporary audio file: %s", temp_path)
+
+
 @app.post("/interview/start")
 async def start_interview(
     request: InterviewStartRequest,
@@ -3754,17 +3855,24 @@ async def start_interview(
 @app.post("/interview/{session_id}/answer")
 async def submit_answer(
     session_id: str,
-    answer: str = Query(..., min_length=1),
+    payload: Optional[InterviewAnswerRequest] = Body(None),
+    answer: Optional[str] = Query(None, min_length=1),
     audio_duration: Optional[float] = Query(None, ge=0),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    # Prefer JSON body, but keep query params for backward compatibility.
+    final_answer = (payload.answer if payload else answer) or ""
+    final_audio_duration = payload.audio_duration if payload and payload.audio_duration is not None else audio_duration
+    if not final_answer.strip():
+        raise HTTPException(status_code=422, detail="Answer cannot be empty")
+
     user_id = current_user["id"]
     session = await _get_session_or_404(user_id, session_id)
     if session["status"] == "completed":
         raise HTTPException(status_code=400, detail="Interview session already completed")
     question = session["questions"][session["current_index"]]
-    evaluation = _evaluate_answer(question, answer)
-    speech = _compute_speech_analysis(answer, audio_duration)
+    evaluation = _evaluate_answer(question, final_answer)
+    speech = _compute_speech_analysis(final_answer, final_audio_duration)
     session["responses"].append(evaluation)
     session["current_index"] += 1
     session["questions_answered"] = len(session["responses"])

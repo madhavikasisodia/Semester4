@@ -10,6 +10,18 @@ import { useEffect, useState } from "react"
 export default function Home() {
   const { user } = useAuthStore()
   const [mounted, setMounted] = useState(false)
+  const targetCompanies = [
+    { name: "PhonePe", logo: "https://cdn.simpleicons.org/phonepe" },
+    { name: "Google", logo: "https://cdn.simpleicons.org/google" },
+    { name: "Amazon", logo: "https://logo.clearbit.com/amazon.com" },
+    { name: "Disney+ Hotstar", logo: "https://logo.clearbit.com/hotstar.com" },
+    { name: "OYO", logo: "https://cdn.simpleicons.org/oyo" },
+    { name: "Goldman Sachs", logo: "https://cdn.simpleicons.org/goldmansachs" },
+    { name: "Flipkart", logo: "https://cdn.simpleicons.org/flipkart" },
+    { name: "Media.net", logo: "https://cdn.simpleicons.org/medianet" },
+    { name: "Walmart", logo: "https://cdn.simpleicons.org/walmart" },
+  ]
+  const [failedLogos, setFailedLogos] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     setMounted(true)
@@ -103,6 +115,35 @@ export default function Home() {
                   <feature.icon className="w-8 h-8 text-accent mb-4" />
                   <h3 className="text-xl font-semibold mb-2">{feature.title}</h3>
                   <p className="text-muted-foreground">{feature.description}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-10 text-center text-sm md:text-base text-muted-foreground">
+              Prepare for companies like these:
+            </p>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+              {targetCompanies.map((company) => (
+                <div
+                  key={company.name}
+                  className="flex items-center gap-2 rounded-full border border-white/20 bg-white/5 px-3 py-1.5"
+                >
+                  {failedLogos[company.name] ? (
+                    <div className="flex h-[18px] w-[18px] items-center justify-center rounded-sm bg-white text-[9px] font-semibold text-black">
+                      {company.name.slice(0, 1)}
+                    </div>
+                  ) : (
+                    <img
+                      src={company.logo}
+                      alt={`${company.name} logo`}
+                      width={18}
+                      height={18}
+                      className="rounded-sm bg-white p-0.5"
+                      onError={() => {
+                        setFailedLogos((prev) => ({ ...prev, [company.name]: true }))
+                      }}
+                    />
+                  )}
+                  <span className="text-xs md:text-sm text-foreground">{company.name}</span>
                 </div>
               ))}
             </div>

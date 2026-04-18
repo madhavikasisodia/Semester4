@@ -126,7 +126,8 @@ export function Navbar() {
   return (
     <>
       <header className="fixed top-0 inset-x-0 z-50 h-16 glass-dark border-b border-border">
-        <div className="h-full px-4 flex items-center justify-start gap-3">
+        <div className="h-full px-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
           <button
             aria-label={menuOpen ? "Close navigation" : "Open navigation"}
             className="p-2 rounded-lg border border-border/60 bg-background/60"
@@ -137,6 +138,45 @@ export function Navbar() {
           <Link href="/" className="font-bold text-base gradient-text tracking-wide">
             EduNerve
           </Link>
+          </div>
+
+          {mounted && (
+            <div className="hidden md:flex items-center gap-2">
+              <ThemeToggle />
+              {user ? (
+                <>
+                  <Link href="/dashboard">
+                    <Button variant="ghost" size="sm">
+                      Dashboard
+                    </Button>
+                  </Link>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      logout()
+                      window.location.href = "/"
+                    }}
+                  >
+                    Logout
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Link href="/login">
+                    <Button variant="ghost" size="sm">
+                      Sign In
+                    </Button>
+                  </Link>
+                  <Link href="/signup">
+                    <Button size="sm" className="bg-linear-to-r from-primary to-accent hover:opacity-90">
+                      Sign Up
+                    </Button>
+                  </Link>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </header>
 

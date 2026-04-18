@@ -17,6 +17,12 @@ const formatErrorMessage = (err: any): string => {
   console.log("Error response:", err.response)
   console.log("Error response data:", err.response?.data)
   
+  const status = err.response?.status
+  const requestUrl = String(err.config?.url || "")
+  if ((status === 404 || status === 405) && requestUrl.includes("/interview/transcribe")) {
+    return "Whisper transcription endpoint is unavailable. Please restart backend server to load the latest routes."
+  }
+
   // Check if it's a FastAPI validation error
   if (Array.isArray(err.response?.data?.detail)) {
     const details = err.response.data.detail.map((e: any) => 
@@ -60,10 +66,10 @@ export default function InterviewPage() {
   const [recordedChunks, setRecordedChunks] = useState<Blob[]>([])
   const [recordingStartTime, setRecordingStartTime] = useState<number>(0)
   const [recordingDuration, setRecordingDuration] = useState<number>(0)
+  const [isTranscribing, setIsTranscribing] = useState(false)
   
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const recognitionRef = useRef<any>(null)
 
   useEffect(() => {
     const fetchPersonas = async () => {
@@ -133,6 +139,7 @@ export default function InterviewPage() {
     setInterviewComplete(false)
     setFinalReport(null)
     setCurrentQuestion(null)
+    setIsTranscribing(false)
     stopMediaStream()
   }
 
@@ -175,7 +182,7 @@ export default function InterviewPage() {
       return
     }
     
-    const options = { mimeType: 'video/webm' }
+    const options = { mimeType: "video/webm;codecs=vp8,opus" }
     const recorder = new MediaRecorder(mediaStream, options)
     
     const chunks: Blob[] = []
@@ -186,8 +193,34 @@ export default function InterviewPage() {
       }
     }
     
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       setRecordedChunks(chunks)
+      if (chunks.length === 0) {
+        setError("No audio captured. Please record your answer again.")
+        return
+      }
+
+      const blob = new Blob(chunks, { type: recorder.mimeType || "video/webm" })
+      const file = new File([blob], `answer-${Date.now()}.webm`, {
+        type: blob.type || "video/webm",
+      })
+
+      setIsTranscribing(true)
+      setError(null)
+      try {
+        const transcription = await interviewAPI.transcribeAudio(file)
+        const transcript = transcription.text?.trim() || ""
+        if (!transcript) {
+          setError("Whisper could not detect speech. Please try recording again.")
+          return
+        }
+        setAnswer(transcript)
+      } catch (err: any) {
+        console.error("Transcription error:", err)
+        setError(formatErrorMessage(err))
+      } finally {
+        setIsTranscribing(false)
+      }
     }
     
     mediaRecorderRef.current = recorder
@@ -195,9 +228,6 @@ export default function InterviewPage() {
     setIsRecording(true)
     setRecordingStartTime(Date.now())
     setAnswer("") // Clear previous answer
-    
-    // Start speech recognition
-    startSpeechRecognition()
   }
 
   // Stop recording
@@ -208,67 +238,6 @@ export default function InterviewPage() {
       
       const duration = (Date.now() - recordingStartTime) / 1000
       setRecordingDuration(duration)
-      
-      stopSpeechRecognition()
-    }
-  }
-
-  // Speech-to-text recognition
-  const startSpeechRecognition = () => {
-    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
-    
-    if (!SpeechRecognition) {
-      console.warn("Speech recognition not supported")
-      return
-    }
-    
-    const recognition = new SpeechRecognition()
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.lang = 'en-US'
-    
-    recognition.onresult = (event: any) => {
-      let transcript = ''
-      for (let i = 0; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript + ' '
-      }
-      setAnswer(transcript.trim())
-    }
-    
-    recognition.onerror = (event: any) => {
-      // Filter out benign errors (no-speech happens naturally when user pauses)
-      if (event.error !== 'no-speech' && event.error !== 'aborted') {
-        console.error('Speech recognition error:', event.error)
-        if (event.error === 'not-allowed') {
-          setError('Microphone access denied. Please enable microphone permissions.')
-        }
-      }
-    }
-    
-    recognition.onend = () => {
-      // Auto-restart recognition if still recording
-      if (isRecording && recognitionRef.current) {
-        try {
-          recognitionRef.current.start()
-        } catch (error) {
-          console.log('Recognition already running')
-        }
-      }
-    }
-    
-    recognitionRef.current = recognition
-    try {
-      recognition.start()
-    } catch (error) {
-      console.log('Recognition start failed:', error)
-    }
-  }
-
-  // Stop speech recognition
-  const stopSpeechRecognition = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop()
-      recognitionRef.current = null
     }
   }
 
@@ -340,9 +309,6 @@ export default function InterviewPage() {
   useEffect(() => {
     if (sessionStarted && !interviewComplete && recordingMode === "text") {
       startMediaCapture()
-    }
-    return () => {
-      stopSpeechRecognition()
     }
   }, [sessionStarted])
 
@@ -622,7 +588,7 @@ export default function InterviewPage() {
                   </Card>
 
                   {/* Interviewer Avatar */}
-                  <Card className="p-4 flex flex-col items-center justify-center bg-gradient-to-br from-primary/10 to-primary/5">
+                  <Card className="p-4 flex flex-col items-center justify-center bg-linear-to-br from-primary/10 to-primary/5">
                     <Brain className="h-24 w-24 text-primary mb-4" />
                     <h3 className="text-lg font-semibold">{currentSession.interviewer?.name || "AI Interviewer"}</h3>
                     <p className="text-sm text-muted-foreground">{currentSession.interviewer?.tone || "Professional"}</p>
@@ -657,6 +623,9 @@ export default function InterviewPage() {
                         Recording: {Math.floor(recordingDuration || (Date.now() - recordingStartTime) / 1000)}s
                       </span>
                     )}
+                    {!isRecording && isTranscribing && (
+                      <span className="text-sm text-primary">Transcribing with Whisper...</span>
+                    )}
                   </div>
                   
                   <Textarea
@@ -671,7 +640,7 @@ export default function InterviewPage() {
                     {!isRecording ? (
                       <Button 
                         onClick={startRecording}
-                        disabled={!mediaStream || loading}
+                        disabled={!mediaStream || loading || isTranscribing}
                         className="flex-1"
                         variant="default"
                       >
@@ -691,11 +660,11 @@ export default function InterviewPage() {
                     
                     <Button 
                       onClick={submitAnswer}
-                      disabled={loading || !answer.trim() || isRecording}
+                      disabled={loading || isTranscribing || !answer.trim() || isRecording}
                       className="flex-1"
                     >
                       <Send className="h-4 w-4 mr-2" />
-                      {loading ? "Submitting..." : "Submit Answer"}
+                      {isTranscribing ? "Transcribing..." : loading ? "Submitting..." : "Submit Answer"}
                     </Button>
                   </div>
 
