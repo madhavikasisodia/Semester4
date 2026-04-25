@@ -49,6 +49,7 @@ export default function DoubtsPage() {
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
 
+  // Redirect to login if unauthenticated
   useEffect(() => {
     if (!user) {
       router.push("/login")
@@ -95,6 +96,7 @@ export default function DoubtsPage() {
           title: title.trim(),
           description: description.trim(),
           category,
+          // Parse comma-separated tags and filter out empty ones
           tags: tags.split(",").map(t => t.trim()).filter(t => t),
           priority,
         }),
@@ -121,6 +123,7 @@ export default function DoubtsPage() {
     }
   }
 
+  // Map priority to color styles
   const getPriorityColor = (priority: string) => {
     switch (priority) {
       case "high": return "text-red-500 bg-red-500/10"
@@ -130,6 +133,7 @@ export default function DoubtsPage() {
     }
   }
 
+  // Map status to corresponding icon component
   const getStatusIcon = (status: string) => {
     switch (status) {
       case "resolved": return <CheckCircle2 className="w-4 h-4 text-green-500" />
@@ -143,7 +147,6 @@ export default function DoubtsPage() {
       <Navbar />
       <main className="pt-20 pb-12 min-h-screen">
         <div className="max-w-6xl mx-auto px-4">
-          {/* Header */}
           <div className="mb-8">
             <h1 className="text-4xl font-bold mb-4 flex items-center gap-3">
               <MessageSquare className="w-10 h-10 text-accent" />
@@ -154,7 +157,6 @@ export default function DoubtsPage() {
             </p>
           </div>
 
-          {/* Submit Button */}
           {!showForm && (
             <Card className="glass p-6 mb-8">
               <div className="flex items-center justify-between">
@@ -172,7 +174,6 @@ export default function DoubtsPage() {
             </Card>
           )}
 
-          {/* Submission Form */}
           {showForm && (
             <Card className="glass p-6 mb-8">
               <h2 className="text-2xl font-bold mb-6">Submit Your Doubt</h2>
@@ -273,6 +274,7 @@ export default function DoubtsPage() {
                 </div>
 
                 <div className="flex gap-3">
+                  {/* Show loading text while submitting */}
                   <Button type="submit" disabled={loading}>
                     {loading ? "Submitting..." : "Submit Doubt"}
                   </Button>
@@ -280,6 +282,7 @@ export default function DoubtsPage() {
                     type="button"
                     variant="outline"
                     onClick={() => {
+                      // Hide form and clear any error/success messages
                       setShowForm(false)
                       setError("")
                       setSuccess("")
@@ -292,7 +295,6 @@ export default function DoubtsPage() {
             </Card>
           )}
 
-          {/* My Doubts */}
           <div>
             <h2 className="text-2xl font-bold mb-6">My Doubts ({doubts.length})</h2>
             

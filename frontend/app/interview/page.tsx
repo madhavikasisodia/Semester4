@@ -9,6 +9,7 @@ import { useState, useEffect, useRef } from "react"
 import { interviewAPI, type Persona, type InterviewSession, type InterviewReport } from "@/lib/api"
 import { Textarea } from "@/components/ui/textarea"
 
+// Try multiple storage keys for auth token (different login methods might use different keys)
 const getStoredAccessToken = (): string | null => {
   if (typeof window === "undefined") return null
   return (
@@ -18,6 +19,7 @@ const getStoredAccessToken = (): string | null => {
   )
 }
 
+// Type guard to identify axios-like errors from API calls
 const isAxiosLikeError = (err: any): err is {
   message?: string
   code?: string
@@ -27,7 +29,7 @@ const isAxiosLikeError = (err: any): err is {
   return !!err && typeof err === "object" && ("response" in err || "config" in err || "code" in err)
 }
 
-// Helper function to format error messages
+// Parse various error types and provide user-friendly messages
 const formatErrorMessage = (err: any): string => {
   if (typeof err === 'string') return err
 
@@ -76,25 +78,26 @@ const formatErrorMessage = (err: any): string => {
 }
 
 export default function InterviewPage() {
+  // Interview state
   const [personas, setPersonas] = useState<Persona[]>([])
   const [selectedPersona, setSelectedPersona] = useState<string | null>(null)
   const [sessionStarted, setSessionStarted] = useState(false)
   const [currentSession, setCurrentSession] = useState<InterviewSession | null>(null)
-  const [answer, setAnswer] = useState("")
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [currentFeedback, setCurrentFeedback] = useState<any>(null)
   const [interviewComplete, setInterviewComplete] = useState(false)
   const [finalReport, setFinalReport] = useState<InterviewReport | null>(null)
   const [currentQuestion, setCurrentQuestion] = useState<{ title: string; text?: string; difficulty?: string } | null>(null)
   
-  // Form fields for starting interview
+  // Answer & feedback state
+  const [answer, setAnswer] = useState("")
+  const [currentFeedback, setCurrentFeedback] = useState<any>(null)
+  
+  // Interview setup form fields
   const [candidateName, setCandidateName] = useState("")
   const [targetRole, setTargetRole] = useState("")
   const [interviewType, setInterviewType] = useState("technical")
   const [difficulty, setDifficulty] = useState("medium")
   
-  // Video/Audio recording state
+  // Recording and media state
   const [isRecording, setIsRecording] = useState(false)
   const [recordingMode, setRecordingMode] = useState<"text" | "video">("text")
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null)
@@ -102,13 +105,18 @@ export default function InterviewPage() {
   const [recordingStartTime, setRecordingStartTime] = useState<number>(0)
   const [recordingDuration, setRecordingDuration] = useState<number>(0)
   const [isTranscribing, setIsTranscribing] = useState(false)
-  const [syncingSession, setSyncingSession] = useState(false)
   const [liveRecordingSeconds, setLiveRecordingSeconds] = useState(0)
+  
+  // API & UI state
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [syncingSession, setSyncingSession] = useState(false)
   
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
 
   const syncSessionStatus = async (sessionId: string) => {
+    // Poll backend for latest interview status
     try {
       setSyncingSession(true)
       const status = await interviewAPI.getInterviewStatus(sessionId)
@@ -162,6 +170,7 @@ export default function InterviewPage() {
   }, [])
 
   useEffect(() => {
+    // Restore any existing active interview session on page load
     const restoreActiveSession = async () => {
       if (!getStoredAccessToken()) return
 
@@ -199,6 +208,7 @@ export default function InterviewPage() {
   }, [])
 
   const startInterview = async (persona: string) => {
+    // Validate required fields and create new interview session
     if (!candidateName.trim() || !targetRole.trim()) {
       setError("Please enter your name and target role")
       return
@@ -309,19 +319,21 @@ export default function InterviewPage() {
     }
   }
 
-  // Start recording video answer
+  // Start recording audio answer
   const startRecording = () => {
     if (!mediaStream) {
       setError("Please enable camera first")
       return
     }
 
+    // Extract audio track and create audio-only stream for recording
     const audioTracks = mediaStream.getAudioTracks()
     if (audioTracks.length === 0) {
       setError("Microphone track not found. Please allow microphone access and try again.")
       return
     }
 
+    // Use best supported audio codec for compatibility
     const audioOnlyStream = new MediaStream(audioTracks)
     const preferredMimeTypes = [
       "audio/webm;codecs=opus",
@@ -400,7 +412,7 @@ export default function InterviewPage() {
     }
   }
 
-  // Submit answer with video duration
+  // Submit answer with video duration and handle next question or completion
   const submitAnswer = async () => {
     if (!currentSession || !answer.trim()) {
       setError("Please record an answer first")
@@ -466,7 +478,7 @@ export default function InterviewPage() {
     }
   }
 
-  // Auto-start camera when interview begins
+  // Auto-start camera and microphone when interview begins
   useEffect(() => {
     if (sessionStarted && !interviewComplete && recordingMode === "text") {
       startMediaCapture()
@@ -474,6 +486,7 @@ export default function InterviewPage() {
   }, [sessionStarted])
 
   useEffect(() => {
+    // Auto-speak new questions after a short delay
     if (!sessionStarted || interviewComplete || !currentQuestion) {
       return
     }
@@ -484,6 +497,7 @@ export default function InterviewPage() {
   }, [sessionStarted, interviewComplete, currentQuestion?.title, currentQuestion?.text])
 
   useEffect(() => {
+    // Update recording duration every 500ms for UI display
     if (!isRecording) return
 
     const timer = window.setInterval(() => {
@@ -494,6 +508,7 @@ export default function InterviewPage() {
   }, [isRecording, recordingStartTime])
 
   useEffect(() => {
+    // Poll session status periodically to check if interview is complete
     if (!sessionStarted || interviewComplete || !currentSession?.session_id) return
 
     const intervalId = window.setInterval(() => {
@@ -523,7 +538,7 @@ export default function InterviewPage() {
       
       <main className="container mx-auto px-4 py-8">
         {!sessionStarted ? (
-          // Persona Selection Screen
+          // Pre-interview setup: Select persona and configure interview
           <div className="max-w-6xl mx-auto space-y-8">
             <div className="text-center space-y-4">
               <h1 className="text-4xl font-bold">AI Mock Interview</h1>
@@ -545,6 +560,7 @@ export default function InterviewPage() {
             <Card className="p-6 max-w-2xl mx-auto space-y-4">
               <h2 className="text-2xl font-semibold">Interview Setup</h2>
               
+              {/* Collect candidate information and interview preferences */}
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium mb-2">Your Name</label>
@@ -633,7 +649,7 @@ export default function InterviewPage() {
             </div>
           </div>
         ) : interviewComplete && finalReport ? (
-          // Final Report Screen
+          // Display interview results and performance metrics
           <div className="max-w-4xl mx-auto space-y-8">
             <div className="text-center space-y-4">
               <div className="flex justify-center">
