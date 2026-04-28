@@ -26,6 +26,11 @@ from supabase import Client, create_client
 from dotenv import load_dotenv
 import pdfplumber
 
+try:
+    from rag_service import answer_with_rag
+except Exception:
+    answer_with_rag = None
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -5432,6 +5437,9 @@ class DoubtChatResponse(BaseModel):
     practice_question: Optional[str] = None
     difficulty_level: Optional[str] = None
     suggestions: List[str] = Field(default_factory=list, description="Follow-up suggestions for user")
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    rag_used: Optional[bool] = None
 
 
 class LearningAssistant:
@@ -5727,6 +5735,21 @@ async def doubts_chat(
     """
     try:
         user_id = current_user.get("id") or current_user.get("user_id")
+
+        if answer_with_rag is not None:
+            rag_result = answer_with_rag(
+                query=request.message,
+                user_context={
+                    "user_id": user_id,
+                    "weak_topics": request.weak_topics,
+                    "readiness_score": request.readiness_score,
+                    "learning_goal": request.learning_goal,
+                    "conversation_history": request.conversation_history,
+                },
+            )
+            if rag_result.get("rag_used"):
+                return DoubtChatResponse(**rag_result)
+
         response = learning_assistant.generate_response(
             user_message=request.message,
             conversation_history=request.conversation_history,
