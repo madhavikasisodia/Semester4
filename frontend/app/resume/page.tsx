@@ -157,13 +157,46 @@ export default function ResumePage() {
       console.log('Making analyze request with config:', config)
       const { data } = await api.post(`/resume/${resumeId}/analyze`, null, config)
       
-      console.log('Analyze response received:', data)
+      console.log('Full analyze response received:', JSON.stringify(data, null, 2))
       
       if (!data) {
         throw new Error('No analysis data received')
       }
+
+      // Validate data structure
+      if (!data.overall_score) {
+        console.warn('Missing overall_score in response')
+      }
+      if (!data.strengths) {
+        console.warn('Missing strengths in response, using empty array')
+        data.strengths = []
+      }
+      if (!data.matched_skills) {
+        console.warn('Missing matched_skills in response, using empty array')
+        data.matched_skills = []
+      }
+      if (!data.missing_skills) {
+        console.warn('Missing missing_skills in response, using empty array')
+        data.missing_skills = []
+      }
+      if (!data.recommendations) {
+        console.warn('Missing recommendations in response, using empty array')
+        data.recommendations = []
+      }
+      if (!data.extracted_skills) {
+        console.warn('Missing extracted_skills in response, using empty array')
+        data.extracted_skills = []
+      }
       
-      console.log('Setting analysis data')
+      console.log('Setting analysis data with structure:', {
+        overall_score: data.overall_score,
+        strengths: data.strengths?.length,
+        matched_skills: data.matched_skills?.length,
+        missing_skills: data.missing_skills?.length,
+        recommendations: data.recommendations?.length,
+        extracted_skills: data.extracted_skills?.length,
+      })
+      
       setAnalysis(data)
       setSelectedResumeId(resumeId)
     } catch (err) {
@@ -307,97 +340,140 @@ export default function ResumePage() {
             <p className="text-slate-600">Analyzing your resume...</p>
           </Card>
         ) : analysis ? (
-          <Card className="p-6">
-            <h2 className="text-2xl font-semibold text-slate-900 mb-6">Resume Analysis</h2>
+          <Card className="p-6 space-y-8">
+            <div>
+              <h2 className="text-2xl font-semibold text-slate-900 mb-6">Resume Analysis Results</h2>
 
-            {/* Score Summary */}
-            <div className="grid md:grid-cols-3 gap-4 mb-8">
-              <Card className="p-4 bg-gradient-to-br from-blue-50 to-blue-100">
-                <p className="text-sm text-slate-600 mb-2">Overall Score</p>
-                <p className="text-3xl font-bold text-blue-900">{analysis.overall_score.toFixed(1)}%</p>
-              </Card>
-              <Card className="p-4 bg-gradient-to-br from-purple-50 to-purple-100">
-                <p className="text-sm text-slate-600 mb-2">Match with {analysis.job_preference}</p>
-                <p className="text-3xl font-bold text-purple-900">{analysis.match_percentage.toFixed(0)}%</p>
-              </Card>
-              <Card className="p-4 bg-gradient-to-br from-teal-50 to-teal-100">
-                <p className="text-sm text-slate-600 mb-2">Experience</p>
-                <p className="text-3xl font-bold text-teal-900">
-                  {analysis.experience_years ? `${analysis.experience_years}y` : 'N/A'}
-                </p>
-              </Card>
+              {/* Score Summary */}
+              <div className="grid md:grid-cols-3 gap-4 mb-8">
+                <Card className="p-4 bg-gradient-to-br from-blue-50 to-blue-100">
+                  <p className="text-sm text-slate-600 mb-2">Overall Score</p>
+                  <p className="text-3xl font-bold text-blue-900">{analysis.overall_score.toFixed(1)}%</p>
+                </Card>
+                <Card className="p-4 bg-gradient-to-br from-purple-50 to-purple-100">
+                  <p className="text-sm text-slate-600 mb-2">Match with {analysis.job_preference}</p>
+                  <p className="text-3xl font-bold text-purple-900">{analysis.match_percentage.toFixed(0)}%</p>
+                </Card>
+                <Card className="p-4 bg-gradient-to-br from-teal-50 to-teal-100">
+                  <p className="text-sm text-slate-600 mb-2">Experience</p>
+                  <p className="text-3xl font-bold text-teal-900">
+                    {analysis.experience_years ? `${analysis.experience_years}y` : 'N/A'}
+                  </p>
+                </Card>
+              </div>
             </div>
 
-            {/* Strengths */}
-            {analysis.strengths.length > 0 && (
-              <div className="mb-8">
-                <h3 className="text-lg font-semibold text-green-900 mb-3 flex items-center">
-                  <CheckCircle2 className="mr-2 h-5 w-5 text-green-600" />
-                  Strengths
-                </h3>
-                <ul className="space-y-2">
-                  {analysis.strengths.map((strength, idx) => (
-                    <li key={idx} className="text-slate-700 flex items-start">
-                      <span className="text-green-600 mr-3">✓</span>
-                      {strength}
-                    </li>
-                  ))}
-                </ul>
+            {/* Summary */}
+            {analysis.summary && (
+              <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="text-slate-700">{analysis.summary}</p>
               </div>
             )}
 
+            {/* Strengths */}
+            <div>
+              <h3 className="text-lg font-semibold text-green-900 mb-4 flex items-center">
+                <CheckCircle2 className="mr-2 h-5 w-5 text-green-600" />
+                Strengths
+              </h3>
+              {analysis.strengths && analysis.strengths.length > 0 ? (
+                <ul className="space-y-3">
+                  {analysis.strengths.map((strength, idx) => (
+                    <li key={idx} className="text-slate-700 flex items-start bg-green-50 p-3 rounded-lg">
+                      <span className="text-green-600 mr-3 font-bold">✓</span>
+                      <span>{strength}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-slate-500 italic">No strengths identified yet. Add more relevant skills to your resume.</p>
+              )}
+            </div>
+
+            {/* Extracted Skills */}
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 mb-4">Extracted Skills ({analysis.extracted_skills?.length || 0})</h3>
+              {analysis.extracted_skills && analysis.extracted_skills.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {analysis.extracted_skills.map((skill, idx) => (
+                    <Badge key={idx} variant="secondary" className="bg-blue-100 text-blue-800">
+                      {skill}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-slate-500 italic">No skills detected. Make sure to include technical skills in your resume.</p>
+              )}
+            </div>
+
             {/* Matched Skills */}
-            {analysis.matched_skills.length > 0 && (
-              <div className="mb-8">
-                <h3 className="text-lg font-semibold text-slate-900 mb-3">Matched Skills ({analysis.matched_skills.length})</h3>
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 mb-4 flex items-center">
+                <CheckCircle2 className="mr-2 h-5 w-5 text-green-600" />
+                Matched Skills ({analysis.matched_skills?.length || 0})
+              </h3>
+              {analysis.matched_skills && analysis.matched_skills.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {analysis.matched_skills.map((skill, idx) => (
                     <Badge
                       key={idx}
                       variant={skill.importance === 'high' ? 'default' : 'secondary'}
-                      className="bg-green-100 text-green-800 hover:bg-green-200"
+                      className={skill.importance === 'high' ? 'bg-green-600' : 'bg-green-100 text-green-800'}
                     >
                       {skill.skill}
+                      {skill.importance === 'high' && ' ★'}
                     </Badge>
                   ))}
                 </div>
-              </div>
-            )}
+              ) : (
+                <p className="text-slate-500 italic">No matched skills for {analysis.job_preference}. Consider adding relevant skills.</p>
+              )}
+            </div>
 
             {/* Missing Skills */}
-            {analysis.missing_skills.length > 0 && (
-              <div className="mb-8">
-                <h3 className="text-lg font-semibold text-slate-900 mb-3">Skills Gap ({analysis.missing_skills.length})</h3>
+            {analysis.missing_skills && analysis.missing_skills.length > 0 && (
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900 mb-4 flex items-center">
+                  <XCircle className="mr-2 h-5 w-5 text-orange-600" />
+                  Skills Gap ({analysis.missing_skills.length})
+                </h3>
                 <div className="space-y-2">
                   {analysis.missing_skills.filter((s) => s.importance === 'high').map((skill, idx) => (
-                    <div key={idx} className="flex items-center justify-between p-3 bg-red-50 rounded-lg">
-                      <span className="text-slate-700">{skill.skill}</span>
-                      <Badge variant="outline" className="border-red-200 text-red-700">
+                    <div key={idx} className="flex items-center justify-between p-3 bg-orange-50 rounded-lg border border-orange-200">
+                      <span className="text-slate-700 font-medium">{skill.skill}</span>
+                      <Badge variant="outline" className="border-orange-300 text-orange-700 bg-orange-100">
                         High Priority
                       </Badge>
                     </div>
                   ))}
+                  {analysis.missing_skills.filter((s) => s.importance !== 'high').length > 0 && (
+                    <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                      <p className="text-sm text-slate-600">Other useful skills: {analysis.missing_skills.filter((s) => s.importance !== 'high').map((s) => s.skill).join(', ')}</p>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
 
             {/* Recommendations */}
-            {analysis.recommendations.length > 0 && (
-              <div>
-                <h3 className="text-lg font-semibold text-slate-900 mb-3 flex items-center">
-                  <TrendingUp className="mr-2 h-5 w-5 text-blue-600" />
-                  Recommendations
-                </h3>
-                <ul className="space-y-2">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900 mb-4 flex items-center">
+                <TrendingUp className="mr-2 h-5 w-5 text-blue-600" />
+                Recommendations for Improvement
+              </h3>
+              {analysis.recommendations && analysis.recommendations.length > 0 ? (
+                <ul className="space-y-3">
                   {analysis.recommendations.map((rec, idx) => (
-                    <li key={idx} className="text-slate-700 flex items-start">
-                      <span className="text-blue-600 mr-3">→</span>
-                      {rec}
+                    <li key={idx} className="text-slate-700 flex items-start bg-blue-50 p-3 rounded-lg">
+                      <span className="text-blue-600 mr-3 font-bold">{idx + 1}.</span>
+                      <span>{rec}</span>
                     </li>
                   ))}
                 </ul>
-              </div>
-            )}
+              ) : (
+                <p className="text-slate-500 italic">Great job! No specific recommendations at this time.</p>
+              )}
+            </div>
           </Card>
         ) : (
           <Card className="p-8 text-center">

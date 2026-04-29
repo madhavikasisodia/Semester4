@@ -4045,31 +4045,66 @@ def _generate_resume_recommendations(
     recommendations: List[str] = []
     strengths: List[str] = []
     
-    # Strengths
+    # Strengths - Always generate at least some
     if matched_skills:
         high_importance = [s for s in matched_skills if s.importance == "high"]
         if high_importance:
-            strengths.append(f"Strong alignment with {job_preference} role: {', '.join([s.skill.title() for s in high_importance[:3]])}")
-    
-    if len(extracted_skills) >= 8:
-        strengths.append(f"Well-rounded skill set with {len(extracted_skills)} technical skills")
+            job_target = job_preference.title() if job_preference else "target role"
+            strengths.append(f"Strong alignment with {job_target}: {', '.join([s.skill.title() for s in high_importance[:3]])}")
     
     if extracted_skills:
-        strengths.append(f"Expertise in {extracted_skills[0].title()} and related technologies")
+        strengths.append(f"Demonstrates expertise in {extracted_skills[0].title()}")
+        
+    if len(extracted_skills) >= 8:
+        strengths.append(f"Well-rounded technical skill set ({len(extracted_skills)} skills identified)")
+    elif len(extracted_skills) >= 5:
+        strengths.append(f"Good foundation with {len(extracted_skills)} key technical skills")
     
-    # Recommendations
+    if len(matched_skills) > 0:
+        match_ratio = len([s for s in matched_skills if s.importance == "high"]) / max(len(matched_skills), 1)
+        if match_ratio >= 0.5:
+            strengths.append("Strong match with job requirements")
+    
+    # If no strengths generated, add a default one
+    if not strengths:
+        strengths.append("Resume demonstrates technical capability")
+    
+    # Recommendations - Always provide actionable feedback
+    
+    # High priority skills gap
     high_priority_missing = [s for s in missing_skills if s.importance == "high"][:3]
     if high_priority_missing:
         skills_str = ", ".join([s.skill.title() for s in high_priority_missing])
-        recommendations.append(f"Consider highlighting experience with: {skills_str}")
+        recommendations.append(f"Add experience with critical skills: {skills_str}")
     
+    # Skill breadth
     if len(extracted_skills) < 5:
-        recommendations.append("Add more specific technical skills and tools used in your projects")
+        recommendations.append("Expand your technical skill set - include more tools and technologies you've worked with")
     
-    recommendations.append("Include quantifiable achievements (e.g., 'improved performance by 40%')")
-    recommendations.append("Add links to GitHub or portfolio projects demonstrating your skills")
-    recommendations.append("Highlight leadership, problem-solving, or cross-functional collaboration examples")
-    recommendations.append("Include metrics and business impact of your work where possible")
+    if len(extracted_skills) < 3:
+        recommendations.append("Include specific programming languages and frameworks used in your projects")
+    
+    # Content recommendations
+    recommendations.append("Highlight quantifiable achievements with metrics (e.g., 'improved response time by 40%')")
+    recommendations.append("Add links to GitHub repositories or portfolio projects showcasing your work")
+    recommendations.append("Include examples of problem-solving and cross-functional collaboration")
+    
+    # Job-specific recommendations
+    if job_preference:
+        job_target = job_preference.title()
+        if job_preference.lower() == "backend":
+            recommendations.append("Emphasize database design and API development experience")
+        elif job_preference.lower() == "frontend":
+            recommendations.append("Showcase responsive design and user experience improvements")
+        elif job_preference.lower() == "fullstack":
+            recommendations.append("Demonstrate both backend and frontend project work")
+        elif job_preference.lower() == "devops":
+            recommendations.append("Highlight infrastructure automation and deployment pipeline improvements")
+        elif job_preference.lower() == "data science":
+            recommendations.append("Include specific ML models built and datasets analyzed")
+    
+    # Always add this final recommendation
+    recommendations.append("Update your resume regularly with recent projects and achievements")
     
     return strengths, recommendations
 
@@ -4154,31 +4189,41 @@ async def analyze_resume(
     if resume is None:
         raise HTTPException(status_code=404, detail="Resume not found")
     
+    logger.info(f"Analyzing resume {resume_id}, job_preference: {job_preference}")
+    
     # Use provided job_preference or resume's job_preference
     final_job_preference = job_preference or resume.get("job_preference")
+    logger.info(f"Final job preference for resume {resume_id}: {final_job_preference}")
     
     # Extract text if not already extracted
     extracted_text = resume.get("extracted_text", "")
     extracted_skills = resume.get("extracted_skills", [])
     
+    logger.info(f"Extracted text length: {len(extracted_text)}, extracted skills: {extracted_skills}")
+    
     if not extracted_skills:
         extracted_skills = _extract_skills_from_text(extracted_text)
+        logger.info(f"Re-extracted skills: {extracted_skills}")
     
     experience_years = resume.get("experience_years") or _estimate_experience_years(extracted_text)
+    logger.info(f"Experience years: {experience_years}")
     
     # Recalculate score if job preference changed
     if final_job_preference != resume.get("job_preference"):
         score, matched_skills, missing_skills = _calculate_resume_score(
             extracted_skills, final_job_preference, experience_years
         )
+        logger.info(f"Recalculated score: {score}, matched: {len(matched_skills)}, missing: {len(missing_skills)}")
     else:
         score = resume.get("overall_score", 50)
         matched_skills = [SkillMatch(**s) if isinstance(s, dict) else s for s in resume.get("matched_skills", [])]
         missing_skills = [SkillMatch(**s) if isinstance(s, dict) else s for s in resume.get("missing_skills", [])]
+        logger.info(f"Using cached score: {score}, matched: {len(matched_skills)}, missing: {len(missing_skills)}")
     
     strengths, recommendations = _generate_resume_recommendations(
         matched_skills, missing_skills, extracted_skills, final_job_preference
     )
+    logger.info(f"Generated strengths: {len(strengths)}, recommendations: {len(recommendations)}")
     
     # Create preview of extracted text (first 500 chars)
     text_preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
@@ -4199,6 +4244,8 @@ async def analyze_resume(
         strengths=strengths,
         analyzed_at=_current_timestamp(),
     )
+    
+    logger.info(f"Analysis result created for resume {resume_id}: {analysis_result}")
     
     resume["analysis"] = analysis_result.dict()
     return analysis_result
