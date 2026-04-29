@@ -40,6 +40,7 @@ interface Resume {
   match_percentage?: number
   extracted_skills?: string[]
   experience_years?: number
+  job_preference?: string
 }
 
 export default function ResumePage() {
@@ -116,19 +117,22 @@ export default function ResumePage() {
       formData.append('file', file)
       formData.append('job_preference', jobPreference)
 
+      console.log('Uploading resume with job preference:', jobPreference)
       const { data } = await api.post('/resume/upload', formData)
 
+      console.log('Upload response:', data)
       setSuccess(`Resume uploaded successfully! Score: ${data.overall_score?.toFixed(1)}%`)
       setFile(null)
       setSelectedResumeId(data.id)
       await fetchResumes()
       
       // Auto-analyze after upload
+      console.log('Calling analyze for resume ID:', data.id)
       setTimeout(() => handleAnalyze(data.id), 500)
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to upload resume'
       setError(errorMsg)
-      console.error(err)
+      console.error('Upload error:', err)
     } finally {
       setLoading(false)
     }
@@ -139,14 +143,33 @@ export default function ResumePage() {
     setError('')
 
     try {
-      const { data } = await api.post(`/resume/${resumeId}/analyze`, {}, {
-        params: { job_preference: jobPreference }
-      })
+      // Find the resume to get its stored job preference if available
+      const resume = resumes.find(r => r.id === resumeId)
+      const jobPref = jobPreference || resume?.job_preference
+
+      console.log('Analyzing resume:', resumeId, 'with job pref:', jobPref, 'resume found:', !!resume)
+
+      const config: any = {}
+      if (jobPref) {
+        config.params = { job_preference: jobPref }
+      }
+
+      console.log('Making analyze request with config:', config)
+      const { data } = await api.post(`/resume/${resumeId}/analyze`, null, config)
+      
+      console.log('Analyze response received:', data)
+      
+      if (!data) {
+        throw new Error('No analysis data received')
+      }
+      
+      console.log('Setting analysis data')
       setAnalysis(data)
       setSelectedResumeId(resumeId)
     } catch (err) {
-      setError('Failed to analyze resume')
-      console.error(err)
+      const errorMsg = err instanceof Error ? err.message : 'Failed to analyze resume'
+      setError(errorMsg)
+      console.error('Analysis error:', err)
     } finally {
       setAnalyzing(false)
     }
@@ -252,18 +275,24 @@ export default function ResumePage() {
                 <div
                   key={resume.id}
                   className="flex items-center justify-between p-4 rounded-lg hover:bg-slate-50 cursor-pointer transition border border-slate-200"
-                  onClick={() => handleAnalyze(resume.id)}
+                  onClick={() => !analyzing && handleAnalyze(resume.id)}
+                  style={{ opacity: analyzing && selectedResumeId !== resume.id ? 0.6 : 1 }}
                 >
                   <div className="flex-1">
                     <p className="font-medium text-slate-900">{resume.filename}</p>
                     <p className="text-xs text-slate-500">
                       Uploaded: {new Date(resume.upload_date).toLocaleDateString()}
+                      {resume.job_preference && ` • Target: ${resume.job_preference}`}
                     </p>
                   </div>
-                  {resume.overall_score && (
-                    <Badge className={getScoreBadgeColor(resume.overall_score)}>
-                      Score: {resume.overall_score.toFixed(0)}%
-                    </Badge>
+                  {analyzing && selectedResumeId === resume.id ? (
+                    <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                  ) : (
+                    resume.overall_score && (
+                      <Badge className={getScoreBadgeColor(resume.overall_score)}>
+                        Score: {resume.overall_score.toFixed(0)}%
+                      </Badge>
+                    )
                   )}
                 </div>
               ))}
@@ -272,7 +301,12 @@ export default function ResumePage() {
         )}
 
         {/* Analysis Results */}
-        {analysis && (
+        {analyzing && !analysis ? (
+          <Card className="p-8 text-center">
+            <Loader2 className="h-12 w-12 mx-auto mb-4 text-blue-600 animate-spin" />
+            <p className="text-slate-600">Analyzing your resume...</p>
+          </Card>
+        ) : analysis ? (
           <Card className="p-6">
             <h2 className="text-2xl font-semibold text-slate-900 mb-6">Resume Analysis</h2>
 
@@ -365,9 +399,7 @@ export default function ResumePage() {
               </div>
             )}
           </Card>
-        )}
-
-        {!analysis && (
+        ) : (
           <Card className="p-8 text-center">
             <FileText className="h-12 w-12 mx-auto mb-4 text-slate-300" />
             <p className="text-slate-600">Upload and analyze a resume to get started</p>
