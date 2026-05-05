@@ -1003,6 +1003,97 @@ export const systemAPI = {
   },
 }
 
+// ==================== TASK & CALENDAR TYPES ====================
+
+export interface CalendarTask {
+  id: string
+  user_id?: string
+  title: string
+  description?: string
+  due_date: string
+  readiness_level?: number
+  feedback?: string
+  is_completed?: boolean
+  created_at: string
+  updated_at?: string
+}
+
+export interface ReadinessResponse {
+  id: string
+  task_id: string
+  user_id?: string
+  readiness_level: number
+  feedback?: string
+  response_date: string
+  created_at: string
+}
+
+// ==================== TASK MANAGEMENT API ====================
+
+export const taskAPI = {
+  async createTask(title: string, dueDate: string, description?: string): Promise<CalendarTask> {
+    const { data } = await api.post("/tasks", {
+      title,
+      due_date: dueDate,
+      description,
+    })
+    return data
+  },
+
+  async getTasks(): Promise<CalendarTask[]> {
+    const { data } = await api.get("/tasks")
+    return data
+  },
+
+  async getTask(taskId: string): Promise<CalendarTask> {
+    const { data } = await api.get(`/tasks/${taskId}`)
+    return data
+  },
+
+  async updateTask(
+    taskId: string,
+    title?: string,
+    description?: string,
+    dueDate?: string,
+    isCompleted?: boolean
+  ): Promise<CalendarTask> {
+    const { data } = await api.put(`/tasks/${taskId}`, {
+      title,
+      description,
+      due_date: dueDate,
+      is_completed: isCompleted,
+    })
+    return data
+  },
+
+  async deleteTask(taskId: string): Promise<void> {
+    await api.delete(`/tasks/${taskId}`)
+  },
+
+  async submitReadinessResponse(
+    taskId: string,
+    readinessLevel: number,
+    feedback?: string
+  ): Promise<ReadinessResponse> {
+    const { data } = await api.post(`/tasks/${taskId}/readiness`, {
+      readiness_level: readinessLevel,
+      feedback,
+    })
+    return data
+  },
+
+  async getReadinessResponses(taskId?: string): Promise<ReadinessResponse[]> {
+    const url = taskId ? `/readiness?task_id=${taskId}` : "/readiness"
+    const { data } = await api.get(url)
+    return data
+  },
+
+  async getTasksDueToday(): Promise<CalendarTask[]> {
+    const { data } = await api.get("/tasks/due-today")
+    return data
+  },
+}
+
 // ==================== HEALTH CHECK ====================
 
 export const healthAPI = {

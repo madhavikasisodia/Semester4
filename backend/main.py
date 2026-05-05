@@ -5811,3 +5811,191 @@ async def doubts_chat(
         return DoubtChatResponse(
             response="Sorry, I'm having trouble understanding. Could you rephrase your question? 🤔"
         )
+
+# ==================== TASK & CALENDAR MANAGEMENT ====================
+
+# In-memory storage for tasks (in production, use database)
+USER_TASKS: Dict[str, Dict[str, Any]] = {}
+USER_READINESS_RESPONSES: Dict[str, List[Dict[str, Any]]] = {}
+TASK_ID_COUNTER = count(1)
+
+
+class CalendarTaskModel(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    due_date: str = Field(..., description="ISO format date string (YYYY-MM-DD)")
+
+
+class ReadinessResponseModel(BaseModel):
+    readiness_level: int = Field(..., ge=1, le=5)
+    feedback: Optional[str] = None
+
+
+@app.post("/tasks")
+async def create_task(
+    task: CalendarTaskModel,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Create a new calendar task for the user"""
+    user_id = current_user["id"]
+    
+    if user_id not in USER_TASKS:
+        USER_TASKS[user_id] = {}
+    
+    task_id = str(next(TASK_ID_COUNTER))
+    now = _current_timestamp()
+    
+    new_task = {
+        "id": task_id,
+        "user_id": user_id,
+        "title": task.title,
+        "description": task.description,
+        "due_date": task.due_date,
+        "is_completed": False,
+        "created_at": now,
+        "updated_at": now,
+    }
+    
+    USER_TASKS[user_id][task_id] = new_task
+    return new_task
+
+
+@app.get("/tasks")
+async def get_tasks(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> List[Dict[str, Any]]:
+    """Get all tasks for the current user"""
+    user_id = current_user["id"]
+    tasks = USER_TASKS.get(user_id, {})
+    return list(tasks.values())
+
+
+@app.get("/tasks/{task_id}")
+async def get_task(
+    task_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Get a specific task by ID"""
+    user_id = current_user["id"]
+    tasks = USER_TASKS.get(user_id, {})
+    
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return tasks[task_id]
+
+
+@app.put("/tasks/{task_id}")
+async def update_task(
+    task_id: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    due_date: Optional[str] = None,
+    is_completed: Optional[bool] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Update a task"""
+    user_id = current_user["id"]
+    tasks = USER_TASKS.get(user_id, {})
+    
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task = tasks[task_id]
+    
+    if title is not None:
+        task["title"] = title
+    if description is not None:
+        task["description"] = description
+    if due_date is not None:
+        task["due_date"] = due_date
+    if is_completed is not None:
+        task["is_completed"] = is_completed
+    
+    task["updated_at"] = _current_timestamp()
+    return task
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(
+    task_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, str]:
+    """Delete a task"""
+    user_id = current_user["id"]
+    tasks = USER_TASKS.get(user_id, {})
+    
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    del tasks[task_id]
+    return {"message": "Task deleted successfully", "task_id": task_id}
+
+
+@app.post("/tasks/{task_id}/readiness")
+async def submit_readiness_response(
+    task_id: str,
+    response: ReadinessResponseModel,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """Submit a readiness response for a task"""
+    user_id = current_user["id"]
+    
+    # Verify task exists
+    tasks = USER_TASKS.get(user_id, {})
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Initialize user responses if needed
+    if user_id not in USER_READINESS_RESPONSES:
+        USER_READINESS_RESPONSES[user_id] = []
+    
+    readiness_record = {
+        "id": str(next(TASK_ID_COUNTER)),
+        "task_id": task_id,
+        "user_id": user_id,
+        "readiness_level": response.readiness_level,
+        "feedback": response.feedback,
+        "response_date": _current_timestamp(),
+        "created_at": _current_timestamp(),
+    }
+    
+    USER_READINESS_RESPONSES[user_id].append(readiness_record)
+    
+    # Mark task as completed
+    tasks[task_id]["is_completed"] = True
+    tasks[task_id]["updated_at"] = _current_timestamp()
+    
+    return readiness_record
+
+
+@app.get("/readiness")
+async def get_readiness_responses(
+    task_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> List[Dict[str, Any]]:
+    """Get readiness responses for the current user"""
+    user_id = current_user["id"]
+    responses = USER_READINESS_RESPONSES.get(user_id, [])
+    
+    if task_id:
+        responses = [r for r in responses if r["task_id"] == task_id]
+    
+    return responses
+
+
+@app.get("/tasks/due-today")
+async def get_tasks_due_today(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> List[Dict[str, Any]]:
+    """Get tasks due today for the current user"""
+    user_id = current_user["id"]
+    tasks = USER_TASKS.get(user_id, {})
+    
+    today = datetime.now(timezone.utc).date().isoformat()
+    due_today = [
+        task for task in tasks.values()
+        if task["due_date"] == today and not task.get("is_completed", False)
+    ]
+    
+    return due_today
