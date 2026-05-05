@@ -323,6 +323,16 @@ export interface Question {
   companies?: string[]
 }
 
+export interface LeetCodeProblem {
+  id: number
+  title: string
+  slug: string
+  difficulty: string
+  link: string
+  is_paid: boolean
+  acceptance_rate?: number | null
+}
+
 // Company Types
 export interface Company {
   name: string
@@ -629,6 +639,24 @@ export const questionsAPI = {
 
     const { data } = await api.get(`/questions/random?${params.toString()}`)
     return data.questions
+  },
+}
+
+// ==================== LEETCODE API ====================
+
+export const leetcodeAPI = {
+  async getProblems(
+    difficulty?: string,
+    limit: number = 50,
+    includePaid: boolean = false
+  ): Promise<LeetCodeProblem[]> {
+    const params = new URLSearchParams()
+    if (difficulty) params.append("difficulty", difficulty)
+    if (limit) params.append("limit", limit.toString())
+    if (includePaid) params.append("include_paid", "true")
+
+    const { data } = await api.get(`/leetcode/problems?${params.toString()}`)
+    return data.problems
   },
 }
 
@@ -1028,6 +1056,15 @@ export interface ReadinessResponse {
   created_at: string
 }
 
+export interface JavaExecuteResponse {
+  compile_success: boolean
+  compile_output: string
+  stdout: string
+  stderr: string
+  time_ms: number
+  exit_code?: number | null
+}
+
 // ==================== TASK MANAGEMENT API ====================
 
 export const taskAPI = {
@@ -1090,6 +1127,18 @@ export const taskAPI = {
 
   async getTasksDueToday(): Promise<CalendarTask[]> {
     const { data } = await api.get("/tasks/due-today")
+    return data
+  },
+}
+
+// ==================== CODE RUNNER API ====================
+
+export const codeRunnerAPI = {
+  async executeJava(code: string, stdin?: string): Promise<JavaExecuteResponse> {
+    const { data } = await api.post("/code/java/execute", {
+      code,
+      stdin: stdin ?? "",
+    })
     return data
   },
 }

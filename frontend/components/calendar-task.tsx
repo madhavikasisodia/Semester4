@@ -33,11 +33,11 @@ interface ReadinessResponse {
 }
 
 const READINESS_LEVELS = [
-  { value: 1, label: "Not Ready", color: "bg-red-100 text-red-800" },
-  { value: 2, label: "Somewhat Ready", color: "bg-orange-100 text-orange-800" },
-  { value: 3, label: "Moderately Ready", color: "bg-yellow-100 text-yellow-800" },
-  { value: 4, label: "Mostly Ready", color: "bg-lime-100 text-lime-800" },
-  { value: 5, label: "Very Ready", color: "bg-green-100 text-green-800" },
+  { value: 1, label: "Not Ready", color: "bg-red-500/15 text-red-600 dark:text-red-300 border border-red-500/30" },
+  { value: 2, label: "Somewhat Ready", color: "bg-orange-500/15 text-orange-600 dark:text-orange-300 border border-orange-500/30" },
+  { value: 3, label: "Moderately Ready", color: "bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30" },
+  { value: 4, label: "Mostly Ready", color: "bg-lime-500/15 text-lime-600 dark:text-lime-300 border border-lime-500/30" },
+  { value: 5, label: "Very Ready", color: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30" },
 ]
 
 const STORAGE_KEY = "calendar_tasks"
@@ -248,17 +248,17 @@ export function CalendarTask() {
   return (
     <div className="space-y-6">
       {successMessage && (
-        <Alert className="bg-green-50 border-green-200">
-          <CheckCircle2 className="h-4 w-4 text-green-600" />
-          <AlertDescription className="text-green-800">{successMessage}</AlertDescription>
+        <Alert className="bg-emerald-500/10 border-emerald-500/30">
+          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+          <AlertDescription className="text-emerald-500">{successMessage}</AlertDescription>
         </Alert>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Calendar Section */}
         <div className="lg:col-span-1">
-          <Card className="p-4">
-            <h3 className="font-semibold mb-4 flex items-center gap-2">
+          <Card className="p-4 border-border/60 bg-background/70 shadow-md shadow-black/5">
+            <h3 className="font-semibold mb-4 flex items-center gap-2 text-foreground">
               <CalendarIcon className="h-5 w-5" />
               Task Calendar
             </h3>
@@ -269,11 +269,11 @@ export function CalendarTask() {
               disabled={(date) => isBefore(date, startOfDay(new Date())) && !isToday(date)}
               className="rounded-lg border"
             />
-            <div className="mt-4 space-y-2 text-sm">
-              <p className="text-xs text-gray-600">
+            <div className="mt-4 space-y-2 text-sm text-muted-foreground">
+              <p className="text-xs">
                 📌 {tasks.length} total task{tasks.length !== 1 ? "s" : ""}
               </p>
-              <p className="text-xs text-gray-600">
+              <p className="text-xs">
                 ✓ {tasksWithResponses.length} task{tasksWithResponses.length !== 1 ? "s" : ""} tracked
               </p>
             </div>
@@ -289,13 +289,13 @@ export function CalendarTask() {
               Add New Task
             </Button>
           ) : (
-            <Card className="p-4">
-              <h3 className="font-semibold mb-4">
+            <Card className="p-4 border-border/60 bg-background/70 shadow-md shadow-black/5">
+              <h3 className="font-semibold mb-4 text-foreground">
                 {editingTask ? "Edit Task" : "Create New Task"}
               </h3>
               <div className="space-y-4">
                 <div>
-                  <label className="text-sm font-medium">Task Title *</label>
+                  <label className="text-sm font-medium text-foreground">Task Title *</label>
                   <Input
                     placeholder="e.g., System Design Interview Prep"
                     value={formData.title}
@@ -304,7 +304,7 @@ export function CalendarTask() {
                   />
                 </div>
                 <div>
-                  <label className="text-sm font-medium">Description</label>
+                  <label className="text-sm font-medium text-foreground">Description</label>
                   <Textarea
                     placeholder="Add any details about this task..."
                     value={formData.description}
@@ -314,8 +314,8 @@ export function CalendarTask() {
                   />
                 </div>
                 <div>
-                  <label className="text-sm font-medium">Due Date</label>
-                  <p className="text-sm text-gray-600 mt-1">
+                  <label className="text-sm font-medium text-foreground">Due Date</label>
+                  <p className="text-sm text-muted-foreground mt-1">
                     Selected: <strong>{format(selectedDate, "PPP")}</strong>
                   </p>
                 </div>
@@ -345,11 +345,11 @@ export function CalendarTask() {
 
           {/* Tasks for Selected Date */}
           <div>
-            <h3 className="font-semibold mb-3">
+            <h3 className="font-semibold mb-3 text-foreground">
               Tasks for {format(selectedDate, "PPP")}
             </h3>
             {tasksForSelectedDate.length === 0 ? (
-              <Card className="p-6 text-center text-gray-500">
+              <Card className="p-6 text-center text-muted-foreground border-border/60 bg-background/70 shadow-md shadow-black/5">
                 <Clock className="h-8 w-8 mx-auto mb-2 opacity-50" />
                 <p>No tasks scheduled for this date</p>
               </Card>
@@ -358,23 +358,27 @@ export function CalendarTask() {
                 {tasksForSelectedDate.map((task) => {
                   const response = responses.find((r) => r.taskId === task.id)
                   return (
-                    <Card key={task.id} className="p-4">
+                    <Card key={task.id} className="p-4 border-border/60 bg-background/70 shadow-md shadow-black/5">
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
                             <h4 className="font-semibold">{task.title}</h4>
                             {task.isCompleted && (
-                              <Badge className="bg-green-100 text-green-800">Completed</Badge>
+                              <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
+                                Completed
+                              </Badge>
                             )}
                             {isToday(task.dueDate) && (
-                              <Badge className="bg-blue-100 text-blue-800">Due Today</Badge>
+                              <Badge className="bg-blue-500/15 text-blue-600 dark:text-blue-300 border border-blue-500/30">
+                                Due Today
+                              </Badge>
                             )}
                           </div>
                           {task.description && (
-                            <p className="text-sm text-gray-600 mb-2">{task.description}</p>
+                            <p className="text-sm text-muted-foreground mb-2">{task.description}</p>
                           )}
                           {response && (
-                            <div className="mt-2 p-2 bg-gray-50 rounded text-sm">
+                            <div className="mt-2 p-3 bg-background/80 border border-border/60 rounded-lg text-sm">
                               <p className="font-medium mb-1">
                                 Readiness:{" "}
                                 <span
@@ -386,9 +390,9 @@ export function CalendarTask() {
                                 </span>
                               </p>
                               {response.feedback && (
-                                <p className="text-gray-700">Feedback: {response.feedback}</p>
+                                <p className="text-foreground">Feedback: {response.feedback}</p>
                               )}
-                              <p className="text-xs text-gray-500 mt-1">
+                              <p className="text-xs text-muted-foreground mt-1">
                                 Responded: {format(response.responseDate, "PPpp")}
                               </p>
                             </div>
@@ -423,10 +427,10 @@ export function CalendarTask() {
 
       {/* Readiness Dialog */}
       <Dialog open={showReadinessDialog} onOpenChange={setShowReadinessDialog}>
-        <DialogContent className="sm:max-w-[500px]">
+        <DialogContent className="sm:max-w-[500px] border-border/60 bg-background/90 backdrop-blur">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <AlertCircle className="h-5 w-5 text-blue-600" />
+              <AlertCircle className="h-5 w-5 text-primary" />
               Task Readiness Assessment
             </DialogTitle>
             <DialogDescription>
@@ -442,7 +446,7 @@ export function CalendarTask() {
             <div className="space-y-6 py-4">
               <div>
                 <p className="text-sm font-semibold mb-3">
-                  How ready are you for <span className="text-blue-600">{selectedTaskForReadiness.title}</span>?
+                  How ready are you for <span className="text-primary">{selectedTaskForReadiness.title}</span>?
                 </p>
                 <div className="space-y-2">
                   {READINESS_LEVELS.map((level) => (
@@ -451,12 +455,12 @@ export function CalendarTask() {
                       onClick={() => setReadinessData({ ...readinessData, level: level.value })}
                       className={`w-full p-3 text-left rounded-lg border-2 transition ${
                         readinessData.level === level.value
-                          ? `border-blue-500 ${level.color}`
-                          : "border-gray-200 hover:border-gray-300"
+                          ? `border-primary ${level.color}`
+                          : "border-border/60 hover:border-border"
                       }`}
                     >
                       <p className="font-medium">{level.label}</p>
-                      <p className="text-xs text-gray-600">
+                      <p className="text-xs text-muted-foreground">
                         {level.value === 1 && "Need more preparation"}
                         {level.value === 2 && "Need some more preparation"}
                         {level.value === 3 && "Somewhat prepared"}
@@ -469,7 +473,7 @@ export function CalendarTask() {
               </div>
 
               <div>
-                <label className="text-sm font-medium">
+                <label className="text-sm font-medium text-foreground">
                   Feedback (optional)
                 </label>
                 <Textarea
@@ -514,8 +518,8 @@ export function CalendarTask() {
 
       {/* Progress Tracking Section */}
       {tasksWithResponses.length > 0 && (
-        <Card className="p-6">
-          <h3 className="font-semibold mb-4">📊 Progress Tracking</h3>
+        <Card className="p-6 border-border/60 bg-background/70 shadow-md shadow-black/5">
+          <h3 className="font-semibold mb-4 text-foreground">Progress Tracking</h3>
           <div className="space-y-3">
             {tasksWithResponses.map((task) => {
               const response = responses.find((r) => r.taskId === task.id)
@@ -523,11 +527,11 @@ export function CalendarTask() {
               return (
                 <div
                   key={task.id}
-                  className="flex items-center justify-between p-3 bg-gray-50 rounded"
+                  className="flex items-center justify-between gap-3 p-3 bg-background/80 border border-border/60 rounded-lg"
                 >
                   <div>
                     <p className="font-medium">{task.title}</p>
-                    <p className="text-xs text-gray-600">
+                    <p className="text-xs text-muted-foreground">
                       Due: {format(task.dueDate, "PPP")}
                     </p>
                   </div>

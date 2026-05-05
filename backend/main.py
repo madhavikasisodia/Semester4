@@ -3,6 +3,9 @@ import logging
 import os
 import random
 import re
+import shutil
+import subprocess
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -41,6 +44,7 @@ logger = logging.getLogger(__name__)
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
+LEETCODE_PROBLEMS_URL = "https://leetcode.com/api/problems/algorithms/"
 LEETCODE_HEADERS = {
         "Referer": "https://leetcode.com",
         "Origin": "https://leetcode.com",
@@ -69,6 +73,12 @@ query userProfile($username: String!) {
 }
 """
 LEETCODE_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+LEETCODE_PROBLEMS_CACHE: Dict[str, Any] = {
+    "fetched_at": None,
+    "items": [],
+}
+LEETCODE_PROBLEMS_CACHE_TTL = timedelta(minutes=30)
 
 GITHUB_USER_URL = "https://api.github.com/users/{username}"
 GITHUB_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
@@ -158,6 +168,48 @@ def _safe_int(value: Any) -> int:
                 return 0
 
 
+async def _fetch_leetcode_problem_list() -> Tuple[List[Dict[str, Any]], str]:
+    cached_at = LEETCODE_PROBLEMS_CACHE.get("fetched_at")
+    if isinstance(cached_at, datetime):
+        if datetime.now(timezone.utc) - cached_at < LEETCODE_PROBLEMS_CACHE_TTL:
+            return LEETCODE_PROBLEMS_CACHE.get("items", []), cached_at.isoformat()
+
+    async with httpx.AsyncClient(timeout=LEETCODE_TIMEOUT, headers=LEETCODE_HEADERS) as client:
+        response = await client.get(LEETCODE_PROBLEMS_URL)
+        response.raise_for_status()
+        payload = response.json()
+
+    pairs = payload.get("stat_status_pairs", [])
+    items: List[Dict[str, Any]] = []
+    for pair in pairs:
+        stat = pair.get("stat") or {}
+        difficulty = (pair.get("difficulty") or {}).get("level")
+        difficulty_label = {1: "easy", 2: "medium", 3: "hard"}.get(difficulty, "unknown")
+
+        total_acs = _safe_int(stat.get("total_acs"))
+        total_submitted = _safe_int(stat.get("total_submitted"))
+        acceptance_rate = None
+        if total_submitted > 0:
+            acceptance_rate = round((total_acs / total_submitted) * 100, 2)
+
+        items.append(
+            {
+                "id": _safe_int(stat.get("question_id")),
+                "title": stat.get("question__title"),
+                "slug": stat.get("question__title_slug"),
+                "difficulty": difficulty_label,
+                "link": f"https://leetcode.com/problems/{stat.get('question__title_slug')}/",
+                "is_paid": bool(pair.get("paid_only")),
+                "acceptance_rate": acceptance_rate,
+            }
+        )
+
+    fetched_at = datetime.now(timezone.utc)
+    LEETCODE_PROBLEMS_CACHE["fetched_at"] = fetched_at
+    LEETCODE_PROBLEMS_CACHE["items"] = items
+    return items, fetched_at.isoformat()
+
+
 def _find_difficulty_entry(entries: List[Dict[str, Any]], difficulty: str) -> Dict[str, Any]:
         target = difficulty.lower()
         for entry in entries:
@@ -234,6 +286,27 @@ class AuthResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+
+
+JAVA_MAX_SOURCE_BYTES = 200_000
+JAVA_MAX_STDIN_BYTES = 50_000
+JAVA_COMPILE_TIMEOUT_SECONDS = 10
+JAVA_RUN_TIMEOUT_SECONDS = 5
+
+
+class JavaExecuteRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=JAVA_MAX_SOURCE_BYTES)
+    stdin: Optional[str] = ""
+    timeout_ms: Optional[int] = Field(None, ge=1000, le=20000)
+
+
+class JavaExecuteResponse(BaseModel):
+    compile_success: bool
+    compile_output: str = ""
+    stdout: str = ""
+    stderr: str = ""
+    time_ms: int
+    exit_code: Optional[int] = None
 
 
 class TopicResourceItem(BaseModel):
@@ -354,6 +427,94 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ensure_java_tooling() -> None:
+    if shutil.which("javac") is None or shutil.which("java") is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Java toolchain not available on the server. Install a JDK and ensure javac/java are on PATH.",
+        )
+
+
+def _validate_java_payload(payload: JavaExecuteRequest) -> None:
+    source_bytes = payload.code.encode("utf-8")
+    if len(source_bytes) > JAVA_MAX_SOURCE_BYTES:
+        raise HTTPException(status_code=413, detail="Source code payload is too large.")
+    if payload.stdin:
+        stdin_bytes = payload.stdin.encode("utf-8")
+        if len(stdin_bytes) > JAVA_MAX_STDIN_BYTES:
+            raise HTTPException(status_code=413, detail="Input payload is too large.")
+
+
+def _run_java_code(payload: JavaExecuteRequest) -> JavaExecuteResponse:
+    _ensure_java_tooling()
+    _validate_java_payload(payload)
+
+    start_time = time.monotonic()
+
+    with tempfile.TemporaryDirectory(prefix="java-runner-") as temp_dir:
+        work_dir = Path(temp_dir)
+        source_path = work_dir / "Main.java"
+        source_path.write_text(payload.code, encoding="utf-8")
+
+        try:
+            compile_result = subprocess.run(
+                ["javac", "Main.java"],
+                cwd=work_dir,
+                text=True,
+                capture_output=True,
+                timeout=JAVA_COMPILE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+            return JavaExecuteResponse(
+                compile_success=False,
+                compile_output="Compilation timed out.",
+                time_ms=elapsed_ms,
+            )
+
+        compile_output = (compile_result.stdout or "") + (compile_result.stderr or "")
+        if compile_result.returncode != 0:
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+            return JavaExecuteResponse(
+                compile_success=False,
+                compile_output=compile_output.strip(),
+                time_ms=elapsed_ms,
+                exit_code=compile_result.returncode,
+            )
+
+        timeout_seconds = (payload.timeout_ms or (JAVA_RUN_TIMEOUT_SECONDS * 1000)) / 1000.0
+
+        try:
+            run_result = subprocess.run(
+                ["java", "-Xmx256m", "-cp", ".", "Main"],
+                cwd=work_dir,
+                text=True,
+                input=payload.stdin or "",
+                capture_output=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+            return JavaExecuteResponse(
+                compile_success=True,
+                compile_output=compile_output.strip(),
+                stdout="",
+                stderr="Execution timed out.",
+                time_ms=elapsed_ms,
+                exit_code=None,
+            )
+
+    elapsed_ms = int((time.monotonic() - start_time) * 1000)
+    return JavaExecuteResponse(
+        compile_success=True,
+        compile_output=compile_output.strip(),
+        stdout=run_result.stdout or "",
+        stderr=run_result.stderr or "",
+        time_ms=elapsed_ms,
+        exit_code=run_result.returncode,
+    )
 
 
 @lru_cache
@@ -3675,6 +3836,25 @@ async def refresh_tokens(request: RefreshRequest) -> AuthResponse:
 # ----------------------- Profile & Social APIs -----------------------
 
 
+@app.get("/leetcode/problems")
+async def get_leetcode_problems(
+    difficulty: Optional[str] = None,
+    limit: Optional[int] = Query(50, ge=1, le=200),
+    include_paid: bool = False,
+) -> Dict[str, Any]:
+    items, fetched_at = await _fetch_leetcode_problem_list()
+    filtered = items
+    if not include_paid:
+        filtered = [item for item in filtered if not item.get("is_paid")]
+    if difficulty:
+        filtered = [
+            item for item in filtered if item.get("difficulty") == difficulty.lower()
+        ]
+    if limit is not None:
+        filtered = filtered[:limit]
+    return {"problems": filtered, "fetched_at": fetched_at}
+
+
 @app.get("/leetcode/{username}")
 async def get_leetcode_profile(username: str) -> Dict[str, Any]:
     return await _fetch_leetcode_profile(username)
@@ -3753,6 +3933,17 @@ async def get_questions_by_subject(
     if limit is not None:
         questions = questions[:limit]
     return {"questions": questions}
+
+
+# ----------------------- Code Runner APIs -----------------------
+
+
+@app.post("/code/java/execute", response_model=JavaExecuteResponse)
+async def execute_java_code(
+    payload: JavaExecuteRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> JavaExecuteResponse:
+    return await run_in_threadpool(_run_java_code, payload)
 
 
 # ----------------------- Companies APIs -----------------------

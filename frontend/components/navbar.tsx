@@ -8,6 +8,7 @@ import { useAuthStore } from "@/lib/store"
 import {
   BookOpen,
   BrainCircuit,
+  Code,
   FileText,
   LayoutDashboard,
   LogOut,
@@ -69,6 +70,8 @@ export function Navbar() {
   }
 
   const navLinks = [
+    { href: "/practice", label: "Practice Coding Question", icon: Code },
+    { href: "/calendar", label: "Calendar", icon: Target },
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { href: "/learning", label: "Learning", icon: BookOpen },
     { href: "/recommendations", label: "Recommendations", icon: Sparkles },
