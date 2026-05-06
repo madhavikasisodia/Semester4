@@ -231,8 +231,8 @@ def _validate_email(value: str) -> str:
 class SignUpRequest(BaseModel):
     email: str
     password: str = Field(..., min_length=6, max_length=64)
-    github_username: str = Field(..., min_length=1, max_length=100)
-    leetcode_username: str = Field(..., min_length=1, max_length=100)
+    github_username: Optional[str] = Field(None, min_length=1, max_length=100)
+    leetcode_username: Optional[str] = Field(None, min_length=1, max_length=100)
     metadata: Optional[Dict[str, Any]] = None
 
     @field_validator("email")
@@ -242,7 +242,9 @@ class SignUpRequest(BaseModel):
 
     @field_validator("github_username")
     @classmethod
-    def normalize_github(cls, value: str) -> str:
+    def normalize_github(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
         try:
             return _normalize_github_username(value)
         except HTTPException as exc:
@@ -250,10 +252,12 @@ class SignUpRequest(BaseModel):
 
     @field_validator("leetcode_username")
     @classmethod
-    def normalize_leetcode(cls, value: str) -> str:
-        cleaned = (value or "").strip()
+    def normalize_leetcode(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        cleaned = value.strip()
         if not cleaned:
-            raise ValueError("LeetCode username is required.")
+            raise ValueError("LeetCode username is required when provided.")
         return cleaned
 
 
@@ -3861,12 +3865,10 @@ async def health_check() -> HealthResponse:
 async def sign_up(request: SignUpRequest) -> AuthResponse:
     client = get_supabase_client()
     profile_metadata = dict(request.metadata or {})
-    profile_metadata.update(
-        {
-            "github_username": request.github_username,
-            "leetcode_username": request.leetcode_username,
-        }
-    )
+    if request.github_username:
+        profile_metadata["github_username"] = request.github_username
+    if request.leetcode_username:
+        profile_metadata["leetcode_username"] = request.leetcode_username
     payload = {
         "email": request.email,
         "password": request.password,
