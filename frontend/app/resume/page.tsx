@@ -4,13 +4,12 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuthStore } from '@/lib/store'
 import { api } from '@/lib/api'
+import { Navbar } from '@/components/navbar'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, Upload, CheckCircle2, XCircle, FileText, TrendingUp } from 'lucide-react'
 
@@ -117,17 +116,14 @@ export default function ResumePage() {
       formData.append('file', file)
       formData.append('job_preference', jobPreference)
 
-      console.log('Uploading resume with job preference:', jobPreference)
       const { data } = await api.post('/resume/upload', formData)
 
-      console.log('Upload response:', data)
       setSuccess(`Resume uploaded successfully! Score: ${data.overall_score?.toFixed(1)}%`)
       setFile(null)
       setSelectedResumeId(data.id)
       await fetchResumes()
       
       // Auto-analyze after upload
-      console.log('Calling analyze for resume ID:', data.id)
       setTimeout(() => handleAnalyze(data.id), 500)
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to upload resume'
@@ -147,17 +143,11 @@ export default function ResumePage() {
       const resume = resumes.find(r => r.id === resumeId)
       const jobPref = jobPreference || resume?.job_preference
 
-      console.log('Analyzing resume:', resumeId, 'with job pref:', jobPref, 'resume found:', !!resume)
-
       const config: any = {}
       if (jobPref) {
         config.params = { job_preference: jobPref }
       }
-
-      console.log('Making analyze request with config:', config)
       const { data } = await api.post(`/resume/${resumeId}/analyze`, null, config)
-      
-      console.log('Full analyze response received:', JSON.stringify(data, null, 2))
       
       if (!data) {
         throw new Error('No analysis data received')
@@ -188,15 +178,6 @@ export default function ResumePage() {
         data.extracted_skills = []
       }
       
-      console.log('Setting analysis data with structure:', {
-        overall_score: data.overall_score,
-        strengths: data.strengths?.length,
-        matched_skills: data.matched_skills?.length,
-        missing_skills: data.missing_skills?.length,
-        recommendations: data.recommendations?.length,
-        extracted_skills: data.extracted_skills?.length,
-      })
-      
       setAnalysis(data)
       setSelectedResumeId(resumeId)
     } catch (err) {
@@ -209,45 +190,49 @@ export default function ResumePage() {
   }
 
   const getScoreBadgeColor = (score: number) => {
-    if (score >= 80) return 'bg-green-100 text-green-800'
-    if (score >= 60) return 'bg-yellow-100 text-yellow-800'
-    return 'bg-red-100 text-red-800'
+    if (score >= 80) return 'bg-emerald-500/15 text-emerald-700 border border-emerald-500/30'
+    if (score >= 60) return 'bg-amber-500/15 text-amber-700 border border-amber-500/30'
+    return 'bg-rose-500/15 text-rose-700 border border-rose-500/30'
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 p-6">
-      <div className="max-w-6xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-slate-900 mb-2">Resume Analyzer</h1>
-          <p className="text-slate-600">Upload and analyze your resume based on your job preferences</p>
-        </div>
+    <>
+      <Navbar />
+      <main className="pt-20 pb-12 min-h-screen bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.16),_transparent_55%),radial-gradient(circle_at_15%_40%,_rgba(14,165,233,0.12),_transparent_50%),radial-gradient(circle_at_80%_20%,_rgba(245,158,11,0.12),_transparent_45%)]">
+        <div className="max-w-6xl mx-auto px-4 space-y-8">
+          {/* Header */}
+          <div className="rounded-3xl border border-border/60 bg-background/70 p-6 shadow-lg shadow-black/5 backdrop-blur">
+            <h1 className="text-3xl font-semibold tracking-tight text-foreground">Resume Analyzer</h1>
+            <p className="text-sm text-muted-foreground mt-2">
+              Upload and analyze your resume based on your job preferences.
+            </p>
+          </div>
 
         {/* Upload Section */}
-        <Card className="mb-8 p-6">
-          <h2 className="text-2xl font-semibold text-slate-900 mb-6">Upload Your Resume</h2>
+        <Card className="p-6 border-border/60 bg-background/70 shadow-md shadow-black/5">
+          <h2 className="text-xl font-semibold text-foreground mb-6">Upload Your Resume</h2>
 
           {error && (
-            <Alert className="mb-4 border-red-200 bg-red-50">
-              <XCircle className="h-4 w-4 text-red-600" />
-              <AlertDescription className="text-red-800">{error}</AlertDescription>
+            <Alert className="mb-4 border-red-500/30 bg-red-500/10">
+              <XCircle className="h-4 w-4 text-red-500" />
+              <AlertDescription className="text-red-500">{error}</AlertDescription>
             </Alert>
           )}
 
           {success && (
-            <Alert className="mb-4 border-green-200 bg-green-50">
-              <CheckCircle2 className="h-4 w-4 text-green-600" />
-              <AlertDescription className="text-green-800">{success}</AlertDescription>
+            <Alert className="mb-4 border-emerald-500/30 bg-emerald-500/10">
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              <AlertDescription className="text-emerald-500">{success}</AlertDescription>
             </Alert>
           )}
 
           <div className="grid md:grid-cols-2 gap-6">
             {/* File Upload */}
             <div className="space-y-4">
-              <div className="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center hover:border-slate-400 transition">
-                <FileText className="h-12 w-12 mx-auto mb-4 text-slate-400" />
+              <div className="border-2 border-dashed border-border/70 rounded-2xl p-8 text-center hover:border-border transition bg-background/80">
+                <FileText className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
                 <label className="cursor-pointer">
-                  <p className="text-sm font-medium text-slate-700 mb-2">Click to select PDF resume</p>
+                  <p className="text-sm font-medium text-foreground mb-2">Click to select PDF resume</p>
                   <Input
                     type="file"
                     accept=".pdf"
@@ -255,14 +240,14 @@ export default function ResumePage() {
                     className="hidden"
                   />
                 </label>
-                {file && <p className="text-sm text-green-600 mt-2">Selected: {file.name}</p>}
+                {file && <p className="text-sm text-emerald-500 mt-2">Selected: {file.name}</p>}
               </div>
             </div>
 
             {/* Job Preference */}
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">Job Preference</label>
+                <label className="block text-sm font-medium text-foreground mb-2">Job Preference</label>
                 <Select value={jobPreference} onValueChange={setJobPreference}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select your target role" />
@@ -301,25 +286,25 @@ export default function ResumePage() {
 
         {/* Previous Resumes */}
         {resumes.length > 0 && (
-          <Card className="mb-8 p-6">
-            <h2 className="text-2xl font-semibold text-slate-900 mb-4">Previous Resumes</h2>
+          <Card className="p-6 border-border/60 bg-background/70 shadow-md shadow-black/5">
+            <h2 className="text-xl font-semibold text-foreground mb-4">Previous Resumes</h2>
             <div className="space-y-2">
               {resumes.map((resume) => (
                 <div
                   key={resume.id}
-                  className="flex items-center justify-between p-4 rounded-lg hover:bg-slate-50 cursor-pointer transition border border-slate-200"
+                  className="flex items-center justify-between p-4 rounded-xl hover:bg-foreground/5 cursor-pointer transition border border-border/60 bg-background/80"
                   onClick={() => !analyzing && handleAnalyze(resume.id)}
                   style={{ opacity: analyzing && selectedResumeId !== resume.id ? 0.6 : 1 }}
                 >
                   <div className="flex-1">
-                    <p className="font-medium text-slate-900">{resume.filename}</p>
-                    <p className="text-xs text-slate-500">
+                    <p className="font-medium text-foreground">{resume.filename}</p>
+                    <p className="text-xs text-muted-foreground">
                       Uploaded: {new Date(resume.upload_date).toLocaleDateString()}
                       {resume.job_preference && ` • Target: ${resume.job_preference}`}
                     </p>
                   </div>
                   {analyzing && selectedResumeId === resume.id ? (
-                    <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                    <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
                   ) : (
                     resume.overall_score && (
                       <Badge className={getScoreBadgeColor(resume.overall_score)}>
@@ -335,28 +320,28 @@ export default function ResumePage() {
 
         {/* Analysis Results */}
         {analyzing && !analysis ? (
-          <Card className="p-8 text-center">
-            <Loader2 className="h-12 w-12 mx-auto mb-4 text-blue-600 animate-spin" />
-            <p className="text-slate-600">Analyzing your resume...</p>
+          <Card className="p-8 text-center border-border/60 bg-background/70 shadow-md shadow-black/5">
+            <Loader2 className="h-12 w-12 mx-auto mb-4 text-blue-500 animate-spin" />
+            <p className="text-muted-foreground">Analyzing your resume...</p>
           </Card>
         ) : analysis ? (
-          <Card className="p-6 space-y-8">
+          <Card className="p-6 space-y-8 border-border/60 bg-background/70 shadow-md shadow-black/5">
             <div>
-              <h2 className="text-2xl font-semibold text-slate-900 mb-6">Resume Analysis Results</h2>
+              <h2 className="text-2xl font-semibold text-foreground mb-6">Resume Analysis Results</h2>
 
               {/* Score Summary */}
               <div className="grid md:grid-cols-3 gap-4 mb-8">
-                <Card className="p-4 bg-gradient-to-br from-blue-50 to-blue-100">
-                  <p className="text-sm text-slate-600 mb-2">Overall Score</p>
-                  <p className="text-3xl font-bold text-blue-900">{analysis.overall_score.toFixed(1)}%</p>
+                <Card className="p-4 bg-gradient-to-br from-emerald-500/10 to-emerald-500/5 border border-emerald-500/20">
+                  <p className="text-sm text-muted-foreground mb-2">Overall Score</p>
+                  <p className="text-3xl font-bold text-foreground">{analysis.overall_score.toFixed(1)}%</p>
                 </Card>
-                <Card className="p-4 bg-gradient-to-br from-purple-50 to-purple-100">
-                  <p className="text-sm text-slate-600 mb-2">Match with {analysis.job_preference}</p>
-                  <p className="text-3xl font-bold text-purple-900">{analysis.match_percentage.toFixed(0)}%</p>
+                <Card className="p-4 bg-gradient-to-br from-sky-500/10 to-sky-500/5 border border-sky-500/20">
+                  <p className="text-sm text-muted-foreground mb-2">Match with {analysis.job_preference}</p>
+                  <p className="text-3xl font-bold text-foreground">{analysis.match_percentage.toFixed(0)}%</p>
                 </Card>
-                <Card className="p-4 bg-gradient-to-br from-teal-50 to-teal-100">
-                  <p className="text-sm text-slate-600 mb-2">Experience</p>
-                  <p className="text-3xl font-bold text-teal-900">
+                <Card className="p-4 bg-gradient-to-br from-amber-500/10 to-amber-500/5 border border-amber-500/20">
+                  <p className="text-sm text-muted-foreground mb-2">Experience</p>
+                  <p className="text-3xl font-bold text-foreground">
                     {analysis.experience_years ? `${analysis.experience_years}y` : 'N/A'}
                   </p>
                 </Card>
@@ -365,51 +350,51 @@ export default function ResumePage() {
 
             {/* Summary */}
             {analysis.summary && (
-              <div className="p-4 bg-slate-50 rounded-lg border border-slate-200">
-                <p className="text-slate-700">{analysis.summary}</p>
+              <div className="p-4 bg-background/80 rounded-lg border border-border/60">
+                <p className="text-foreground">{analysis.summary}</p>
               </div>
             )}
 
             {/* Strengths */}
             <div>
-              <h3 className="text-lg font-semibold text-green-900 mb-4 flex items-center">
-                <CheckCircle2 className="mr-2 h-5 w-5 text-green-600" />
+              <h3 className="text-lg font-semibold text-foreground mb-4 flex items-center">
+                <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" />
                 Strengths
               </h3>
               {analysis.strengths && analysis.strengths.length > 0 ? (
                 <ul className="space-y-3">
                   {analysis.strengths.map((strength, idx) => (
-                    <li key={idx} className="text-slate-700 flex items-start bg-green-50 p-3 rounded-lg">
-                      <span className="text-green-600 mr-3 font-bold">✓</span>
+                    <li key={idx} className="text-foreground flex items-start bg-emerald-500/10 p-3 rounded-lg border border-emerald-500/20">
+                      <span className="text-emerald-500 mr-3 font-bold">✓</span>
                       <span>{strength}</span>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="text-slate-500 italic">No strengths identified yet. Add more relevant skills to your resume.</p>
+                <p className="text-muted-foreground italic">No strengths identified yet. Add more relevant skills to your resume.</p>
               )}
             </div>
 
             {/* Extracted Skills */}
             <div>
-              <h3 className="text-lg font-semibold text-slate-900 mb-4">Extracted Skills ({analysis.extracted_skills?.length || 0})</h3>
+              <h3 className="text-lg font-semibold text-foreground mb-4">Extracted Skills ({analysis.extracted_skills?.length || 0})</h3>
               {analysis.extracted_skills && analysis.extracted_skills.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {analysis.extracted_skills.map((skill, idx) => (
-                    <Badge key={idx} variant="secondary" className="bg-blue-100 text-blue-800">
+                    <Badge key={idx} variant="secondary" className="bg-sky-500/15 text-sky-700 border border-sky-500/30">
                       {skill}
                     </Badge>
                   ))}
                 </div>
               ) : (
-                <p className="text-slate-500 italic">No skills detected. Make sure to include technical skills in your resume.</p>
+                <p className="text-muted-foreground italic">No skills detected. Make sure to include technical skills in your resume.</p>
               )}
             </div>
 
             {/* Matched Skills */}
             <div>
-              <h3 className="text-lg font-semibold text-slate-900 mb-4 flex items-center">
-                <CheckCircle2 className="mr-2 h-5 w-5 text-green-600" />
+              <h3 className="text-lg font-semibold text-foreground mb-4 flex items-center">
+                <CheckCircle2 className="mr-2 h-5 w-5 text-emerald-500" />
                 Matched Skills ({analysis.matched_skills?.length || 0})
               </h3>
               {analysis.matched_skills && analysis.matched_skills.length > 0 ? (
@@ -418,7 +403,7 @@ export default function ResumePage() {
                     <Badge
                       key={idx}
                       variant={skill.importance === 'high' ? 'default' : 'secondary'}
-                      className={skill.importance === 'high' ? 'bg-green-600' : 'bg-green-100 text-green-800'}
+                      className={skill.importance === 'high' ? 'bg-emerald-600 text-white' : 'bg-emerald-500/15 text-emerald-700 border border-emerald-500/30'}
                     >
                       {skill.skill}
                       {skill.importance === 'high' && ' ★'}
@@ -426,29 +411,29 @@ export default function ResumePage() {
                   ))}
                 </div>
               ) : (
-                <p className="text-slate-500 italic">No matched skills for {analysis.job_preference}. Consider adding relevant skills.</p>
+                <p className="text-muted-foreground italic">No matched skills for {analysis.job_preference}. Consider adding relevant skills.</p>
               )}
             </div>
 
             {/* Missing Skills */}
             {analysis.missing_skills && analysis.missing_skills.length > 0 && (
               <div>
-                <h3 className="text-lg font-semibold text-slate-900 mb-4 flex items-center">
-                  <XCircle className="mr-2 h-5 w-5 text-orange-600" />
+                <h3 className="text-lg font-semibold text-foreground mb-4 flex items-center">
+                  <XCircle className="mr-2 h-5 w-5 text-amber-500" />
                   Skills Gap ({analysis.missing_skills.length})
                 </h3>
                 <div className="space-y-2">
                   {analysis.missing_skills.filter((s) => s.importance === 'high').map((skill, idx) => (
-                    <div key={idx} className="flex items-center justify-between p-3 bg-orange-50 rounded-lg border border-orange-200">
-                      <span className="text-slate-700 font-medium">{skill.skill}</span>
-                      <Badge variant="outline" className="border-orange-300 text-orange-700 bg-orange-100">
+                    <div key={idx} className="flex items-center justify-between p-3 bg-amber-500/10 rounded-lg border border-amber-500/30">
+                      <span className="text-foreground font-medium">{skill.skill}</span>
+                      <Badge variant="outline" className="border-amber-500/30 text-amber-700 bg-amber-500/10">
                         High Priority
                       </Badge>
                     </div>
                   ))}
                   {analysis.missing_skills.filter((s) => s.importance !== 'high').length > 0 && (
-                    <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
-                      <p className="text-sm text-slate-600">Other useful skills: {analysis.missing_skills.filter((s) => s.importance !== 'high').map((s) => s.skill).join(', ')}</p>
+                    <div className="mt-3 p-3 bg-background/80 rounded-lg border border-border/60">
+                      <p className="text-sm text-muted-foreground">Other useful skills: {analysis.missing_skills.filter((s) => s.importance !== 'high').map((s) => s.skill).join(', ')}</p>
                     </div>
                   )}
                 </div>
@@ -457,31 +442,32 @@ export default function ResumePage() {
 
             {/* Recommendations */}
             <div>
-              <h3 className="text-lg font-semibold text-slate-900 mb-4 flex items-center">
-                <TrendingUp className="mr-2 h-5 w-5 text-blue-600" />
+              <h3 className="text-lg font-semibold text-foreground mb-4 flex items-center">
+                <TrendingUp className="mr-2 h-5 w-5 text-sky-500" />
                 Recommendations for Improvement
               </h3>
               {analysis.recommendations && analysis.recommendations.length > 0 ? (
                 <ul className="space-y-3">
                   {analysis.recommendations.map((rec, idx) => (
-                    <li key={idx} className="text-slate-700 flex items-start bg-blue-50 p-3 rounded-lg">
-                      <span className="text-blue-600 mr-3 font-bold">{idx + 1}.</span>
+                    <li key={idx} className="text-foreground flex items-start bg-sky-500/10 p-3 rounded-lg border border-sky-500/20">
+                      <span className="text-sky-600 mr-3 font-bold">{idx + 1}.</span>
                       <span>{rec}</span>
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="text-slate-500 italic">Great job! No specific recommendations at this time.</p>
+                <p className="text-muted-foreground italic">Great job! No specific recommendations at this time.</p>
               )}
             </div>
           </Card>
         ) : (
-          <Card className="p-8 text-center">
-            <FileText className="h-12 w-12 mx-auto mb-4 text-slate-300" />
-            <p className="text-slate-600">Upload and analyze a resume to get started</p>
+          <Card className="p-8 text-center border-border/60 bg-background/70 shadow-md shadow-black/5">
+            <FileText className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+            <p className="text-muted-foreground">Upload and analyze a resume to get started</p>
           </Card>
         )}
-      </div>
-    </div>
+        </div>
+      </main>
+    </>
   )
 }

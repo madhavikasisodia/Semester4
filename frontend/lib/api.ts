@@ -1031,6 +1031,124 @@ export const systemAPI = {
   },
 }
 
+// ==================== PLACEMENT PIPELINE TYPES ====================
+
+export interface PlacementDrive {
+  id: string
+  company_name: string
+  title: string
+  description?: string | null
+  start_date?: string | null
+  end_date?: string | null
+  status: string
+  eligibility?: Record<string, any> | null
+  created_by?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PlacementOpening {
+  id: string
+  drive_id: string
+  company_name?: string | null
+  role_title: string
+  location?: string | null
+  ctc?: string | null
+  employment_type?: string | null
+  openings_count?: number | null
+  apply_by?: string | null
+  status: string
+  eligibility?: Record<string, any> | null
+  created_by?: string
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PlacementApplication {
+  id: string
+  drive_id: string
+  opening_id: string
+  company_name?: string | null
+  role_title?: string | null
+  user_id: string
+  status: string
+  applied_at?: string
+  updated_at?: string
+  notes?: string | null
+}
+
+// ==================== PLACEMENT PIPELINE API ====================
+
+export const placementAPI = {
+  async createDrive(payload: {
+    company_name: string
+    title: string
+    description?: string
+    start_date?: string
+    end_date?: string
+    status?: string
+    eligibility?: Record<string, any>
+  }): Promise<PlacementDrive> {
+    const { data } = await api.post("/placements/drives", payload)
+    return data
+  },
+
+  async listDrives(status?: string): Promise<PlacementDrive[]> {
+    const url = status ? `/placements/drives?status=${status}` : "/placements/drives"
+    const { data } = await api.get(url)
+    return data
+  },
+
+  async updateDrive(driveId: string, payload: Partial<PlacementDrive>): Promise<PlacementDrive> {
+    const { data } = await api.put(`/placements/drives/${driveId}`, payload)
+    return data
+  },
+
+  async createOpening(payload: {
+    drive_id: string
+    role_title: string
+    location?: string
+    ctc?: string
+    employment_type?: string
+    openings_count?: number
+    apply_by?: string
+    status?: string
+    eligibility?: Record<string, any>
+  }): Promise<PlacementOpening> {
+    const { data } = await api.post("/placements/openings", payload)
+    return data
+  },
+
+  async listOpenings(driveId?: string, status?: string): Promise<PlacementOpening[]> {
+    const params = new URLSearchParams()
+    if (driveId) params.append("drive_id", driveId)
+    if (status) params.append("status", status)
+    const query = params.toString()
+    const url = query ? `/placements/openings?${query}` : "/placements/openings"
+    const { data } = await api.get(url)
+    return data
+  },
+
+  async applyToOpening(openingId: string): Promise<PlacementApplication> {
+    const { data } = await api.post(`/placements/openings/${openingId}/apply`)
+    return data
+  },
+
+  async listApplications(status?: string): Promise<PlacementApplication[]> {
+    const url = status ? `/placements/applications?status=${status}` : "/placements/applications"
+    const { data } = await api.get(url)
+    return data
+  },
+
+  async updateApplicationStatus(
+    applicationId: string,
+    payload: { status: string; notes?: string }
+  ): Promise<PlacementApplication> {
+    const { data } = await api.put(`/placements/applications/${applicationId}/status`, payload)
+    return data
+  },
+}
+
 // ==================== TASK & CALENDAR TYPES ====================
 
 export interface CalendarTask {

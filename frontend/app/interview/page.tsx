@@ -77,6 +77,18 @@ const formatErrorMessage = (err: any): string => {
   return err.message || "An error occurred"
 }
 
+const buildWebSocketUrl = (path: string) => {
+  const base = process.env.NEXT_PUBLIC_API_BASE || ""
+  const fallbackOrigin =
+    typeof window !== "undefined"
+      ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000`
+      : ""
+  const normalizedBase = (base || fallbackOrigin).replace(/\/$/, "")
+  const wsBase = normalizedBase.replace(/^http/, "ws")
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`
+  return `${wsBase}${normalizedPath}`
+}
+
 export default function InterviewPage() {
   // Interview state
   const [personas, setPersonas] = useState<Persona[]>([])
@@ -90,6 +102,10 @@ export default function InterviewPage() {
   // Answer & feedback state
   const [answer, setAnswer] = useState("")
   const [currentFeedback, setCurrentFeedback] = useState<any>(null)
+  const [liveFeedback, setLiveFeedback] = useState<any>(null)
+  const [liveSpeechAnalysis, setLiveSpeechAnalysis] = useState<any>(null)
+  const [liveInterviewerText, setLiveInterviewerText] = useState("")
+  const [liveInterviewerDisplay, setLiveInterviewerDisplay] = useState("")
   
   // Interview setup form fields
   const [candidateName, setCandidateName] = useState("")
@@ -106,14 +122,19 @@ export default function InterviewPage() {
   const [recordingDuration, setRecordingDuration] = useState<number>(0)
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [liveRecordingSeconds, setLiveRecordingSeconds] = useState(0)
+  const [isLiveTranscribing, setIsLiveTranscribing] = useState(false)
   
   // API & UI state
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [syncingSession, setSyncingSession] = useState(false)
+  const [wsStatus, setWsStatus] = useState<"disconnected" | "connecting" | "connected">("disconnected")
   
   const videoRef = useRef<HTMLVideoElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const previewTimerRef = useRef<number | null>(null)
+  const speechRecognitionRef = useRef<any>(null)
 
   const syncSessionStatus = async (sessionId: string) => {
     // Poll backend for latest interview status
@@ -148,6 +169,7 @@ export default function InterviewPage() {
         setInterviewComplete(true)
         setCurrentQuestion(null)
         stopMediaStream()
+        stopLiveTranscription()
       }
     } catch (err: any) {
       setError(formatErrorMessage(err))
@@ -206,6 +228,43 @@ export default function InterviewPage() {
 
     restoreActiveSession()
   }, [])
+
+  useEffect(() => {
+    if (!sessionStarted || !currentSession?.session_id) return
+    const token = getStoredAccessToken()
+    if (!token) return
+
+    const wsUrl = buildWebSocketUrl(`/ws/interview/${currentSession.session_id}?token=${encodeURIComponent(token)}`)
+    const socket = new WebSocket(wsUrl)
+    wsRef.current = socket
+    setWsStatus("connecting")
+
+    socket.onopen = () => setWsStatus("connected")
+    socket.onclose = () => setWsStatus("disconnected")
+    socket.onerror = () => setWsStatus("disconnected")
+    socket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data)
+        if (payload.type === "preview") {
+          if (payload.status === "too_short") return
+          setLiveFeedback(payload.evaluation)
+          setLiveSpeechAnalysis(payload.speech_analysis)
+          setLiveInterviewerText(payload.interviewer_response || "")
+        }
+        if (payload.type === "session_complete") {
+          setWsStatus("disconnected")
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    }
+
+    return () => {
+      socket.close()
+      wsRef.current = null
+      setWsStatus("disconnected")
+    }
+  }, [sessionStarted, currentSession?.session_id])
 
   const startInterview = async (persona: string) => {
     // Validate required fields and create new interview session
@@ -275,11 +334,80 @@ export default function InterviewPage() {
     setSelectedPersona(null)
     setAnswer("")
     setCurrentFeedback(null)
+    setLiveFeedback(null)
+    setLiveSpeechAnalysis(null)
+    setLiveInterviewerText("")
+    setLiveInterviewerDisplay("")
     setInterviewComplete(false)
     setFinalReport(null)
     setCurrentQuestion(null)
     setIsTranscribing(false)
+    setIsLiveTranscribing(false)
     stopMediaStream()
+    stopLiveTranscription()
+    wsRef.current?.close()
+    wsRef.current = null
+    setWsStatus("disconnected")
+  }
+
+  const startLiveTranscription = () => {
+    if (typeof window === "undefined") return
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SpeechRecognition) return
+
+    const recognition = new SpeechRecognition()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = "en-US"
+
+    recognition.onresult = (event: any) => {
+      let interim = ""
+      let finalText = ""
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalText += `${transcript} `
+        } else {
+          interim += transcript
+        }
+      }
+      const combined = `${finalText}${interim}`.trim()
+      if (combined) {
+        setAnswer(combined)
+      }
+    }
+
+    recognition.onerror = () => {
+      setIsLiveTranscribing(false)
+    }
+
+    recognition.onend = () => {
+      setIsLiveTranscribing(false)
+    }
+
+    recognition.start()
+    speechRecognitionRef.current = recognition
+    setIsLiveTranscribing(true)
+  }
+
+  const stopLiveTranscription = () => {
+    const recognition = speechRecognitionRef.current
+    if (recognition) {
+      recognition.stop()
+      speechRecognitionRef.current = null
+    }
+    setIsLiveTranscribing(false)
+  }
+
+  const sendLivePreview = (text: string, durationSeconds?: number) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(
+      JSON.stringify({
+        type: "preview",
+        answer: text,
+        duration_seconds: durationSeconds,
+      })
+    )
   }
 
   // Start camera and microphone
@@ -399,6 +527,7 @@ export default function InterviewPage() {
     setRecordingStartTime(Date.now())
     setLiveRecordingSeconds(0)
     setAnswer("") // Clear previous answer
+    startLiveTranscription()
   }
 
   // Stop recording
@@ -406,6 +535,7 @@ export default function InterviewPage() {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop()
       setIsRecording(false)
+      stopLiveTranscription()
       
       const duration = (Date.now() - recordingStartTime) / 1000
       setRecordingDuration(duration)
@@ -430,6 +560,10 @@ export default function InterviewPage() {
       )
       
       setCurrentFeedback(feedback)
+      setLiveFeedback(null)
+      setLiveSpeechAnalysis(null)
+      setLiveInterviewerText("")
+      setLiveInterviewerDisplay("")
       setAnswer("")
       setRecordedChunks([])
       setRecordingDuration(0)
@@ -506,6 +640,45 @@ export default function InterviewPage() {
 
     return () => window.clearInterval(timer)
   }, [isRecording, recordingStartTime])
+
+  useEffect(() => {
+    if (!sessionStarted || interviewComplete) return
+    const trimmed = answer.trim()
+    if (trimmed.length < 12) {
+      setLiveFeedback(null)
+      setLiveSpeechAnalysis(null)
+      setLiveInterviewerText("")
+      return
+    }
+    if (previewTimerRef.current) {
+      window.clearTimeout(previewTimerRef.current)
+    }
+    previewTimerRef.current = window.setTimeout(() => {
+      sendLivePreview(trimmed, recordingDuration > 0 ? recordingDuration : undefined)
+    }, 600)
+    return () => {
+      if (previewTimerRef.current) {
+        window.clearTimeout(previewTimerRef.current)
+      }
+    }
+  }, [answer, recordingDuration, sessionStarted, interviewComplete])
+
+  useEffect(() => {
+    if (!liveInterviewerText) {
+      setLiveInterviewerDisplay("")
+      return
+    }
+    let index = 0
+    setLiveInterviewerDisplay("")
+    const timer = window.setInterval(() => {
+      index += 1
+      setLiveInterviewerDisplay(liveInterviewerText.slice(0, index))
+      if (index >= liveInterviewerText.length) {
+        window.clearInterval(timer)
+      }
+    }, 18)
+    return () => window.clearInterval(timer)
+  }, [liveInterviewerText])
 
   useEffect(() => {
     // Poll session status periodically to check if interview is complete
@@ -752,6 +925,24 @@ export default function InterviewPage() {
                 {syncingSession && (
                   <p className="text-xs text-muted-foreground mt-1">Syncing live session...</p>
                 )}
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <Badge
+                    className={
+                      wsStatus === "connected"
+                        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30"
+                        : wsStatus === "connecting"
+                        ? "bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30"
+                        : "bg-slate-500/10 text-slate-500 border border-slate-400/30"
+                    }
+                  >
+                    Realtime: {wsStatus}
+                  </Badge>
+                  {isLiveTranscribing && (
+                    <Badge className="bg-sky-500/15 text-sky-600 dark:text-sky-300 border border-sky-500/30">
+                      Live transcript
+                    </Badge>
+                  )}
+                </div>
               </div>
               <Button variant="outline" onClick={resetInterview}>
                 End Interview
@@ -876,6 +1067,56 @@ export default function InterviewPage() {
                     </p>
                   )}
                 </Card>
+
+                {liveFeedback && (
+                  <Card className="p-6 space-y-4 border border-primary/20 bg-primary/5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-lg font-semibold flex items-center gap-2">
+                        <CheckCircle className="h-5 w-5 text-primary" />
+                        Live Feedback
+                      </h3>
+                      <Badge className="bg-primary/15 text-primary border border-primary/30">Updating</Badge>
+                    </div>
+                    <div className="grid md:grid-cols-3 gap-4">
+                      <div>
+                        <p className="text-sm text-muted-foreground">Technical Accuracy</p>
+                        <p className="text-2xl font-bold text-primary">
+                          {liveFeedback.technical_accuracy?.toFixed(0) ?? 0}%
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Completeness</p>
+                        <p className="text-2xl font-bold text-primary">
+                          {liveFeedback.completeness?.toFixed(0) ?? 0}%
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">Clarity</p>
+                        <p className="text-2xl font-bold text-primary">
+                          {liveFeedback.clarity?.toFixed(0) ?? 0}%
+                        </p>
+                      </div>
+                    </div>
+                    {liveSpeechAnalysis && (
+                      <div className="grid md:grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <span className="text-muted-foreground">Speech Rate: </span>
+                          <span className="font-medium">{liveSpeechAnalysis.speech_rate_wpm} WPM</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Confidence: </span>
+                          <span className="font-medium">{liveSpeechAnalysis.confidence_score}%</span>
+                        </div>
+                      </div>
+                    )}
+                    {liveInterviewerDisplay && (
+                      <div className="bg-background/70 border rounded-lg p-3 text-sm">
+                        <p className="text-muted-foreground mb-1">Live interviewer response</p>
+                        <p className="text-foreground whitespace-pre-wrap">{liveInterviewerDisplay}</p>
+                      </div>
+                    )}
+                  </Card>
+                )}
 
                 {currentFeedback && (
                   <Card className="p-6 space-y-4 bg-primary/5">

@@ -7,6 +7,13 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Spinner } from "@/components/ui/spinner"
@@ -43,6 +50,27 @@ const READINESS_LEVELS = [
 const STORAGE_KEY = "calendar_tasks"
 const RESPONSES_KEY = "readiness_responses"
 
+const CREATION_READINESS_OPTIONS = [
+  { value: "not_ready", label: "Not Ready" },
+  { value: "somewhat_ready", label: "Somewhat Ready" },
+  { value: "ready", label: "Ready" },
+]
+
+const CREATION_SUGGESTIONS: Record<string, string[]> = {
+  not_ready: [
+    "Review the core concepts before scheduling the task.",
+    "Break the topic into smaller checkpoints and revisit basics.",
+  ],
+  somewhat_ready: [
+    "Do one focused practice round to strengthen weak spots.",
+    "Skim your notes and refine 1-2 key areas before the task date.",
+  ],
+  ready: [
+    "All the best, be confident.",
+    "Do a quick warm-up and get good rest before the task.",
+  ],
+}
+
 export function CalendarTask() {
   const { user } = useAuthStore()
   const [tasks, setTasks] = useState<Task[]>([])
@@ -51,11 +79,13 @@ export function CalendarTask() {
   const [showReadinessDialog, setShowReadinessDialog] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
   const [formData, setFormData] = useState({ title: "", description: "" })
+  const [creationReadiness, setCreationReadiness] = useState("somewhat_ready")
   const [readinessData, setReadinessData] = useState({ level: 3, feedback: "" })
   const [selectedTaskForReadiness, setSelectedTaskForReadiness] = useState<Task | null>(null)
   const [responses, setResponses] = useState<ReadinessResponse[]>([])
   const [loading, setLoading] = useState(false)
   const [successMessage, setSuccessMessage] = useState("")
+  const [creationSuggestions, setCreationSuggestions] = useState<string[]>([])
 
   // Load tasks and responses from localStorage
   useEffect(() => {
@@ -145,10 +175,15 @@ export function CalendarTask() {
     saveTasks(updatedTasks)
 
     setFormData({ title: "", description: "" })
+    setCreationSuggestions(CREATION_SUGGESTIONS[creationReadiness] ?? [])
+    setCreationReadiness("somewhat_ready")
     setShowTaskForm(false)
     setEditingTask(null)
     setSuccessMessage("Task created successfully!")
-    setTimeout(() => setSuccessMessage(""), 3000)
+    setTimeout(() => {
+      setSuccessMessage("")
+      setCreationSuggestions([])
+    }, 3000)
   }
 
   const handleUpdateTask = () => {
@@ -168,6 +203,7 @@ export function CalendarTask() {
     saveTasks(updatedTasks)
 
     setFormData({ title: "", description: "" })
+    setCreationSuggestions([])
     setShowTaskForm(false)
     setEditingTask(null)
     setSuccessMessage("Task updated successfully!")
@@ -177,6 +213,7 @@ export function CalendarTask() {
   const handleDeleteTask = (taskId: string) => {
     const updatedTasks = tasks.filter((t) => t.id !== taskId)
     saveTasks(updatedTasks)
+    setCreationSuggestions([])
     setSuccessMessage("Task deleted successfully!")
     setTimeout(() => setSuccessMessage(""), 3000)
   }
@@ -185,6 +222,7 @@ export function CalendarTask() {
     setEditingTask(task)
     setSelectedDate(task.dueDate)
     setFormData({ title: task.title, description: task.description || "" })
+    setCreationSuggestions([])
     setShowTaskForm(true)
   }
 
@@ -218,6 +256,7 @@ export function CalendarTask() {
       setSuccessMessage(
         `Readiness response saved! You rated your readiness as "${READINESS_LEVELS[readinessData.level - 1].label}"`
       )
+      setCreationSuggestions([])
 
       setTimeout(() => {
         setShowReadinessDialog(false)
@@ -250,7 +289,21 @@ export function CalendarTask() {
       {successMessage && (
         <Alert className="bg-emerald-500/10 border-emerald-500/30">
           <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-          <AlertDescription className="text-emerald-500">{successMessage}</AlertDescription>
+          <AlertDescription className="text-emerald-500">
+            <div className="space-y-2">
+              <p>{successMessage}</p>
+              {creationSuggestions.length > 0 && (
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-emerald-600 dark:text-emerald-300">
+                  <p className="font-medium">Suggestions</p>
+                  <ul className="list-disc pl-5 mt-1 space-y-1">
+                    {creationSuggestions.map((suggestion) => (
+                      <li key={suggestion}>{suggestion}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </AlertDescription>
         </Alert>
       )}
 
@@ -319,6 +372,33 @@ export function CalendarTask() {
                     Selected: <strong>{format(selectedDate, "PPP")}</strong>
                   </p>
                 </div>
+                {!editingTask && (
+                  <div>
+                    <label className="text-sm font-medium text-foreground">
+                      Readiness for this task
+                    </label>
+                    <Select value={creationReadiness} onValueChange={setCreationReadiness}>
+                      <SelectTrigger className="mt-1 w-full">
+                        <SelectValue placeholder="Select readiness" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CREATION_READINESS_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <div className="mt-3 rounded-lg border border-border/60 bg-background/80 p-3 text-sm">
+                      <p className="font-medium text-foreground">Suggestions</p>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+                        {(CREATION_SUGGESTIONS[creationReadiness] ?? []).map((suggestion) => (
+                          <li key={suggestion}>{suggestion}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <Button
                     onClick={editingTask ? handleUpdateTask : handleAddTask}
@@ -333,6 +413,7 @@ export function CalendarTask() {
                       setShowTaskForm(false)
                       setEditingTask(null)
                       setFormData({ title: "", description: "" })
+                      setCreationReadiness("somewhat_ready")
                     }}
                     className="flex-1"
                   >

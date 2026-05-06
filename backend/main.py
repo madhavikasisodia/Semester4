@@ -370,6 +370,98 @@ class QuizSubmissionAnswer(BaseModel):
     time_taken_seconds: Optional[float] = None
 
 
+PLACEMENT_DRIVE_STATUSES = {"Draft", "Open", "Closed"}
+PLACEMENT_OPENING_STATUSES = {"Open", "Closed"}
+PLACEMENT_APPLICATION_STATUSES = {"Applied", "Shortlisted", "Interview", "Offer", "Joined"}
+
+
+class PlacementDriveCreate(BaseModel):
+    company_name: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    start_date: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD)")
+    status: str = Field("Draft")
+    eligibility: Optional[Dict[str, Any]] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in PLACEMENT_DRIVE_STATUSES:
+            raise ValueError("Invalid drive status")
+        return value
+
+
+class PlacementDriveUpdate(BaseModel):
+    company_name: Optional[str] = Field(None, min_length=1, max_length=200)
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    start_date: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD)")
+    status: Optional[str] = None
+    eligibility: Optional[Dict[str, Any]] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if value not in PLACEMENT_DRIVE_STATUSES:
+            raise ValueError("Invalid drive status")
+        return value
+
+
+class PlacementOpeningCreate(BaseModel):
+    drive_id: str = Field(..., min_length=1)
+    role_title: str = Field(..., min_length=1, max_length=200)
+    location: Optional[str] = Field(None, max_length=200)
+    ctc: Optional[str] = Field(None, max_length=120)
+    employment_type: Optional[str] = Field(None, max_length=120)
+    openings_count: Optional[int] = Field(None, ge=1)
+    apply_by: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD)")
+    status: str = Field("Open")
+    eligibility: Optional[Dict[str, Any]] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in PLACEMENT_OPENING_STATUSES:
+            raise ValueError("Invalid opening status")
+        return value
+
+
+class PlacementOpeningUpdate(BaseModel):
+    role_title: Optional[str] = Field(None, min_length=1, max_length=200)
+    location: Optional[str] = Field(None, max_length=200)
+    ctc: Optional[str] = Field(None, max_length=120)
+    employment_type: Optional[str] = Field(None, max_length=120)
+    openings_count: Optional[int] = Field(None, ge=1)
+    apply_by: Optional[str] = Field(None, description="ISO date (YYYY-MM-DD)")
+    status: Optional[str] = None
+    eligibility: Optional[Dict[str, Any]] = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if value not in PLACEMENT_OPENING_STATUSES:
+            raise ValueError("Invalid opening status")
+        return value
+
+
+class PlacementApplicationUpdate(BaseModel):
+    status: str = Field(...)
+    notes: Optional[str] = Field(None, max_length=2000)
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in PLACEMENT_APPLICATION_STATUSES:
+            raise ValueError("Invalid application status")
+        return value
+
+
 class QuizAttemptSubmitRequest(BaseModel):
     attempt_id: int
     answers: List[QuizSubmissionAnswer] = Field(default_factory=list)
@@ -537,6 +629,9 @@ USER_QUIZZES_TABLE = "user_quizzes"
 QUIZ_ATTEMPTS_TABLE = "quiz_attempts"
 LEARNING_ROADMAPS_TABLE = "user_learning_roadmaps"
 USER_REMINDERS_TABLE = "user_reminders"
+PLACEMENT_DRIVES_TABLE = "placement_drives"
+PLACEMENT_OPENINGS_TABLE = "placement_openings"
+PLACEMENT_APPLICATIONS_TABLE = "placement_applications"
 
 
 def get_supabase_client() -> Client:
@@ -3553,6 +3648,27 @@ def _evaluate_answer(question: Dict[str, Any], answer: str) -> Dict[str, Any]:
         "What optimizations could improve your solution?",
     ]
 
+    def _score_answer_quality(text: str) -> float:
+        if not text:
+            return 0.0
+        raw = text.strip()
+        if len(raw) < 20:
+            return 0.15
+        chars = list(raw)
+        alpha = sum(1 for ch in chars if ch.isalpha())
+        alpha_ratio = alpha / max(len(chars), 1)
+        unique_ratio = len(set(tokens)) / max(word_count, 1)
+        quality = 0.6
+        if word_count < 10:
+            quality -= 0.3
+        if alpha_ratio < 0.6:
+            quality -= 0.2
+        if unique_ratio < 0.4:
+            quality -= 0.15
+        return max(0.15, min(1.0, quality))
+
+    quality_factor = _score_answer_quality(answer)
+
     answer_key = ANSWER_KEYS.get(question.get("id"))
     if answer_key:
         concepts = answer_key.get("concepts", [])
@@ -3568,14 +3684,16 @@ def _evaluate_answer(question: Dict[str, Any], answer: str) -> Dict[str, Any]:
         total = len(concepts)
         coverage_ratio = len(matched) / total if total else 0.0
         threshold = answer_key.get("passing_threshold", 0.6)
-        is_correct = coverage_ratio >= threshold
+        is_correct = coverage_ratio >= threshold and quality_factor >= 0.6
 
-        technical_accuracy = int(55 + coverage_ratio * 45)
-        completeness = int(50 + coverage_ratio * 50)
-        clarity = min(100, 60 + word_count // 2)
+        technical_accuracy = int((35 + coverage_ratio * 65) * quality_factor)
+        completeness = int((30 + coverage_ratio * 70) * quality_factor)
+        clarity = int(min(100, (45 + word_count // 2)) * quality_factor)
 
         feedback_parts = []
-        if is_correct:
+        if quality_factor < 0.35:
+            feedback_parts.append("Answer seems too short or unclear. Add more detail and structure.")
+        elif is_correct:
             feedback_parts.append("Great job covering the critical elements.")
         if missing:
             feedback_parts.append(f"Add detail on: {', '.join(missing[:2])}.")
@@ -3605,12 +3723,14 @@ def _evaluate_answer(question: Dict[str, Any], answer: str) -> Dict[str, Any]:
             "expected_complexity": answer_key.get("complexity"),
         }
 
-    completeness = min(100, max(40, word_count))
-    technical_accuracy = min(100, 60 + word_count // 2)
-    clarity = min(100, 55 + word_count // 3)
+    completeness = int(min(100, max(20, word_count)) * quality_factor)
+    technical_accuracy = int(min(100, 45 + word_count // 2) * quality_factor)
+    clarity = int(min(100, 40 + word_count // 3) * quality_factor)
     coverage_ratio = min(1.0, word_count / 120) if word_count else 0.0
-    is_correct = technical_accuracy >= 70
+    is_correct = technical_accuracy >= 70 and quality_factor >= 0.6
     feedback = "Solid structure, expand on trade-offs." if structured else "Add more structure and concrete examples."
+    if quality_factor < 0.35:
+        feedback = "Answer seems too short or unclear. Add more detail and structure."
 
     return {
         "question": question["title"],
@@ -5183,6 +5303,32 @@ async def get_user_activity_stats(
 
 # ----------------------- WebSocket Endpoint -----------------------
 
+async def _ws_authenticate(websocket: WebSocket) -> Optional[Dict[str, Any]]:
+    if _env_flag("ENABLE_MOCK_AUTH", default=False):
+        return {"id": "test-user", "email": "test@example.com"}
+
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.send_text(json.dumps({"type": "error", "message": "Missing auth token"}))
+        await websocket.close(code=4401)
+        return None
+
+    client = get_supabase_client()
+    try:
+        response = await run_in_threadpool(client.auth.get_user, token)
+    except Exception:
+        await websocket.send_text(json.dumps({"type": "error", "message": "Invalid or expired token"}))
+        await websocket.close(code=4401)
+        return None
+
+    user = getattr(response, "user", None)
+    if user is None:
+        await websocket.send_text(json.dumps({"type": "error", "message": "Invalid or expired token"}))
+        await websocket.close(code=4401)
+        return None
+
+    return {"id": user.id, "email": user.email or ""}
+
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     logger.info(f"WebSocket connection attempt for client: {client_id}")
@@ -5214,6 +5360,79 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     except Exception as e:
         logger.error(f"WebSocket error for client {client_id}: {e}")
         manager.disconnect(websocket, client_id)
+
+
+@app.websocket("/ws/interview/{session_id}")
+async def interview_realtime_socket(websocket: WebSocket, session_id: str):
+    logger.info("Interview realtime socket connection for session %s", session_id)
+    await websocket.accept()
+
+    user = await _ws_authenticate(websocket)
+    if not user:
+        return
+
+    try:
+        session = await _get_session_or_404(user["id"], session_id)
+    except HTTPException:
+        await websocket.send_text(json.dumps({"type": "error", "message": "Interview session not found"}))
+        await websocket.close(code=4404)
+        return
+
+    await websocket.send_text(json.dumps({"type": "connected", "session_id": session_id}))
+
+    while True:
+        try:
+            payload = json.loads(await websocket.receive_text())
+            msg_type = str(payload.get("type") or "").lower()
+
+            if msg_type == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                continue
+
+            if msg_type != "preview":
+                await websocket.send_text(json.dumps({"type": "error", "message": "Unsupported message type"}))
+                continue
+
+            answer = str(payload.get("answer") or "").strip()
+            if len(answer) < 10:
+                await websocket.send_text(json.dumps({"type": "preview", "status": "too_short"}))
+                continue
+
+            session = INTERVIEW_SESSIONS.get(session_id) or session
+            if session.get("status") == "completed":
+                await websocket.send_text(json.dumps({"type": "session_complete"}))
+                await websocket.close(code=1000)
+                return
+
+            question_index = session.get("current_index", 0)
+            question = session.get("questions", [])[question_index]
+            evaluation = _evaluate_answer(question, answer)
+
+            duration_seconds = payload.get("duration_seconds")
+            try:
+                duration_value = float(duration_seconds) if duration_seconds is not None else None
+            except (TypeError, ValueError):
+                duration_value = None
+
+            speech_analysis = _compute_speech_analysis(answer, duration_value)
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "preview",
+                        "evaluation": evaluation,
+                        "speech_analysis": speech_analysis,
+                        "interviewer_response": evaluation.get("feedback", ""),
+                        "question_id": question.get("id"),
+                        "question_index": question_index,
+                    }
+                )
+            )
+        except WebSocketDisconnect:
+            logger.info("Interview realtime socket disconnected for session %s", session_id)
+            return
+        except Exception as exc:
+            logger.warning("Interview realtime socket error: %s", exc, exc_info=True)
+            await websocket.send_text(json.dumps({"type": "error", "message": "Realtime preview failed"}))
 
 
 # ----------------------- Learning Management APIs -----------------------
@@ -6002,6 +6221,369 @@ async def doubts_chat(
         return DoubtChatResponse(
             response="Sorry, I'm having trouble understanding. Could you rephrase your question? 🤔"
         )
+
+# ==================== PLACEMENT PIPELINE ====================
+
+
+async def _fetch_placement_drive(drive_id: str) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(PLACEMENT_DRIVES_TABLE)
+            .select("*")
+            .eq("id", drive_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch placement drive %s", drive_id, exc_info=True)
+        return None
+
+
+async def _fetch_placement_opening(opening_id: str) -> Optional[Dict[str, Any]]:
+    client = get_supabase_client()
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(PLACEMENT_OPENINGS_TABLE)
+            .select("*")
+            .eq("id", opening_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to fetch placement opening %s", opening_id, exc_info=True)
+        return None
+
+
+@app.post("/placements/drives")
+async def create_placement_drive(
+    payload: PlacementDriveCreate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    client = get_supabase_client()
+    now_iso = _current_timestamp()
+    drive_id = str(uuid4())
+    record = {
+        "id": drive_id,
+        "company_name": payload.company_name,
+        "title": payload.title,
+        "description": payload.description,
+        "start_date": payload.start_date,
+        "end_date": payload.end_date,
+        "status": payload.status,
+        "eligibility": payload.eligibility,
+        "created_by": current_user["id"],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+    def _insert() -> None:
+        client.table(PLACEMENT_DRIVES_TABLE).insert(record).execute()
+
+    try:
+        await run_in_threadpool(_insert)
+        return record
+    except Exception as exc:
+        logger.warning("Failed to create placement drive", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to create placement drive") from exc
+
+
+@app.get("/placements/drives")
+async def list_placement_drives(
+    status: Optional[str] = Query(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    _ = current_user
+    client = get_supabase_client()
+
+    def _fetch() -> List[Dict[str, Any]]:
+        query = client.table(PLACEMENT_DRIVES_TABLE).select("*")
+        if status:
+            query = query.eq("status", status)
+        response = query.order("created_at", desc=True).execute()
+        return getattr(response, "data", None) or []
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to list placement drives", exc_info=True)
+        return []
+
+
+@app.get("/placements/drives/{drive_id}")
+async def get_placement_drive(
+    drive_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
+    drive = await _fetch_placement_drive(drive_id)
+    if not drive:
+        raise HTTPException(status_code=404, detail="Placement drive not found")
+    return drive
+
+
+@app.put("/placements/drives/{drive_id}")
+async def update_placement_drive(
+    drive_id: str,
+    payload: PlacementDriveUpdate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
+    client = get_supabase_client()
+    updates = {key: value for key, value in payload.dict().items() if value is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    updates["updated_at"] = _current_timestamp()
+
+    def _update() -> None:
+        client.table(PLACEMENT_DRIVES_TABLE).update(updates).eq("id", drive_id).execute()
+
+    try:
+        await run_in_threadpool(_update)
+    except Exception as exc:
+        logger.warning("Failed to update placement drive %s", drive_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update placement drive") from exc
+
+    updated = await _fetch_placement_drive(drive_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Placement drive not found")
+    return updated
+
+
+@app.post("/placements/openings")
+async def create_placement_opening(
+    payload: PlacementOpeningCreate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    client = get_supabase_client()
+    now_iso = _current_timestamp()
+
+    drive = await _fetch_placement_drive(payload.drive_id)
+    if not drive:
+        raise HTTPException(status_code=404, detail="Placement drive not found")
+
+    opening_id = str(uuid4())
+    record = {
+        "id": opening_id,
+        "drive_id": payload.drive_id,
+        "company_name": drive.get("company_name"),
+        "role_title": payload.role_title,
+        "location": payload.location,
+        "ctc": payload.ctc,
+        "employment_type": payload.employment_type,
+        "openings_count": payload.openings_count,
+        "apply_by": payload.apply_by,
+        "status": payload.status,
+        "eligibility": payload.eligibility,
+        "created_by": current_user["id"],
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+    def _insert() -> None:
+        client.table(PLACEMENT_OPENINGS_TABLE).insert(record).execute()
+
+    try:
+        await run_in_threadpool(_insert)
+        return record
+    except Exception as exc:
+        logger.warning("Failed to create placement opening", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to create placement opening") from exc
+
+
+@app.get("/placements/openings")
+async def list_placement_openings(
+    drive_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    _ = current_user
+    client = get_supabase_client()
+
+    def _fetch() -> List[Dict[str, Any]]:
+        query = client.table(PLACEMENT_OPENINGS_TABLE).select("*")
+        if drive_id:
+            query = query.eq("drive_id", drive_id)
+        if status:
+            query = query.eq("status", status)
+        response = query.order("created_at", desc=True).execute()
+        return getattr(response, "data", None) or []
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to list placement openings", exc_info=True)
+        return []
+
+
+@app.get("/placements/openings/{opening_id}")
+async def get_placement_opening(
+    opening_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
+    opening = await _fetch_placement_opening(opening_id)
+    if not opening:
+        raise HTTPException(status_code=404, detail="Placement opening not found")
+    return opening
+
+
+@app.put("/placements/openings/{opening_id}")
+async def update_placement_opening(
+    opening_id: str,
+    payload: PlacementOpeningUpdate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
+    client = get_supabase_client()
+    updates = {key: value for key, value in payload.dict().items() if value is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    updates["updated_at"] = _current_timestamp()
+
+    def _update() -> None:
+        client.table(PLACEMENT_OPENINGS_TABLE).update(updates).eq("id", opening_id).execute()
+
+    try:
+        await run_in_threadpool(_update)
+    except Exception as exc:
+        logger.warning("Failed to update placement opening %s", opening_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update placement opening") from exc
+
+    updated = await _fetch_placement_opening(opening_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Placement opening not found")
+    return updated
+
+
+@app.post("/placements/openings/{opening_id}/apply")
+async def apply_to_opening(
+    opening_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    client = get_supabase_client()
+    user_id = current_user["id"]
+    opening = await _fetch_placement_opening(opening_id)
+    if not opening:
+        raise HTTPException(status_code=404, detail="Placement opening not found")
+
+    def _check_existing() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(PLACEMENT_APPLICATIONS_TABLE)
+            .select("*")
+            .eq("opening_id", opening_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    existing = await run_in_threadpool(_check_existing)
+    if existing:
+        return existing
+
+    now_iso = _current_timestamp()
+    application_id = str(uuid4())
+    record = {
+        "id": application_id,
+        "drive_id": opening.get("drive_id"),
+        "opening_id": opening_id,
+        "company_name": opening.get("company_name"),
+        "role_title": opening.get("role_title"),
+        "user_id": user_id,
+        "status": "Applied",
+        "applied_at": now_iso,
+        "updated_at": now_iso,
+    }
+
+    def _insert() -> None:
+        client.table(PLACEMENT_APPLICATIONS_TABLE).insert(record).execute()
+
+    try:
+        await run_in_threadpool(_insert)
+        return record
+    except Exception as exc:
+        logger.warning("Failed to apply to placement opening %s", opening_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to apply to opening") from exc
+
+
+@app.get("/placements/applications")
+async def list_placement_applications(
+    status: Optional[str] = Query(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    client = get_supabase_client()
+    user_id = current_user["id"]
+
+    def _fetch() -> List[Dict[str, Any]]:
+        query = (
+            client.table(PLACEMENT_APPLICATIONS_TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+        )
+        if status:
+            query = query.eq("status", status)
+        response = query.order("applied_at", desc=True).execute()
+        return getattr(response, "data", None) or []
+
+    try:
+        return await run_in_threadpool(_fetch)
+    except Exception:
+        logger.warning("Failed to list placement applications", exc_info=True)
+        return []
+
+
+@app.put("/placements/applications/{application_id}/status")
+async def update_placement_application_status(
+    application_id: str,
+    payload: PlacementApplicationUpdate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = current_user
+    client = get_supabase_client()
+    updates = {
+        "status": payload.status,
+        "notes": payload.notes,
+        "updated_at": _current_timestamp(),
+    }
+
+    def _update() -> None:
+        client.table(PLACEMENT_APPLICATIONS_TABLE).update(updates).eq("id", application_id).execute()
+
+    try:
+        await run_in_threadpool(_update)
+    except Exception as exc:
+        logger.warning("Failed to update placement application %s", application_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update application") from exc
+
+    def _fetch() -> Optional[Dict[str, Any]]:
+        response = (
+            client.table(PLACEMENT_APPLICATIONS_TABLE)
+            .select("*")
+            .eq("id", application_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    updated = await run_in_threadpool(_fetch)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Placement application not found")
+    return updated
 
 # ==================== TASK & CALENDAR MANAGEMENT ====================
 

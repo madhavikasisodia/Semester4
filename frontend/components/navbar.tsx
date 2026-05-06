@@ -9,6 +9,7 @@ import {
   BookOpen,
   BrainCircuit,
   Code,
+  Database,
   FileText,
   LayoutDashboard,
   LogOut,
@@ -17,6 +18,7 @@ import {
   Target,
   Trophy,
   X,
+  Briefcase,
 } from "lucide-react"
 import { useState, useEffect } from "react"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -73,6 +75,8 @@ export function Navbar() {
     { href: "/practice", label: "Practice Coding Question", icon: Code },
     { href: "/calendar", label: "Calendar", icon: Target },
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/placements", label: "Placements", icon: Briefcase },
+    { href: "/rag", label: "Insights", icon: Database },
     { href: "/learning", label: "Learning", icon: BookOpen },
     { href: "/recommendations", label: "Recommendations", icon: Sparkles },
     { href: "/progress", label: "Progress", icon: Target },
